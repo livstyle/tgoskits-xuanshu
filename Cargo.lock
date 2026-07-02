@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "ax-api"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "ax-alloc",
  "ax-config",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "ax-display"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ax-lazyinit",
  "ax-sync",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "ax-dma"
-version = "0.6.7"
+version = "0.6.8"
 dependencies = [
  "ax-alloc",
  "ax-allocator",
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "ax-driver"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "aic8800",
  "anyhow",
@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "ax-feat"
-version = "0.5.24"
+version = "0.5.25"
 dependencies = [
  "ax-alloc",
  "ax-display",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "ax-fs-ng"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "ax-errno 0.6.1",
  "ax-io",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "ax-hal"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "ax-alloc",
  "ax-cpu",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "ax-input"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ax-lazyinit",
  "ax-sync",
@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "ax-ipi"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "ax-hal",
  "ax-kspin",
@@ -889,7 +889,7 @@ version = "0.4.8"
 
 [[package]]
 name = "ax-libc"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "ax-driver",
  "ax-errno 0.6.1",
@@ -940,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "ax-mm"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "ax-alloc",
  "ax-errno 0.6.1",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "ax-net"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "ax-posix-api"
-version = "0.5.24"
+version = "0.5.25"
 dependencies = [
  "ax-alloc",
  "ax-config",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "ax-runtime"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aic8800",
  "ax-alloc",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "ax-std"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "ax-alloc",
  "ax-api",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "ax-sync"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "ax-kspin",
  "ax-lockdep",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "ax-task"
-version = "0.5.24"
+version = "0.5.25"
 dependencies = [
  "ax-alloc",
  "ax-cpumask",
@@ -1401,7 +1401,7 @@ version = "0.1.1"
 
 [[package]]
 name = "axplat-dyn"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "ax-cpu",
@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "axvisor"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "anyhow",
  "ax-driver",
@@ -1525,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "axvm"
-version = "0.5.18"
+version = "0.5.19"
 dependencies = [
  "aarch64-cpu-ext",
  "arm-gic-driver",
@@ -6786,7 +6786,7 @@ dependencies = [
 
 [[package]]
 name = "rockchip-soc"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "bitflags 2.13.0",
  "dma-api",
@@ -7307,7 +7307,7 @@ dependencies = [
 
 [[package]]
 name = "sg2002-tpu"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ax-dma",
  "ax-errno 0.6.1",
@@ -7647,7 +7647,7 @@ dependencies = [
 
 [[package]]
 name = "starry-kernel"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "ax-alloc",
  "ax-config",
@@ -7780,7 +7780,7 @@ dependencies = [
 
 [[package]]
 name = "starryos"
-version = "0.5.20"
+version = "0.5.21"
 dependencies = [
  "anyhow",
  "ax-driver",

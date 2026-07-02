@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.21](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.20...starryos-v0.5.21) - 2026-07-02
+
+### Added
+
+- *(starry-kernel)* add RK3588 PWM sysfs support ([#1468](https://github.com/rcore-os/tgoskits/pull/1468))
+
 ## [0.5.20](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.19...starryos-v0.5.20) - 2026-07-02
 
 ### Added

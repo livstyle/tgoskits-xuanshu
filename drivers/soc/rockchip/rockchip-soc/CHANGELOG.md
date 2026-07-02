@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/rcore-os/tgoskits/compare/rockchip-soc-v0.3.5...rockchip-soc-v0.3.6) - 2026-07-02
+
+### Added
+
+- *(starry-kernel)* add RK3588 PWM sysfs support ([#1468](https://github.com/rcore-os/tgoskits/pull/1468))
+
 ## [0.3.5](https://github.com/rcore-os/tgoskits/compare/rockchip-soc-v0.3.4...rockchip-soc-v0.3.5) - 2026-07-02
 
 ### Added

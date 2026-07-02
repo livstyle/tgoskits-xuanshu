@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/rcore-os/tgoskits/compare/ax-driver-v0.10.0...ax-driver-v0.10.1) - 2026-07-02
+
+### Added
+
+- *(starry-kernel)* add RK3588 PWM sysfs support ([#1468](https://github.com/rcore-os/tgoskits/pull/1468))
+
 ## [0.10.0](https://github.com/rcore-os/tgoskits/compare/ax-driver-v0.9.0...ax-driver-v0.10.0) - 2026-07-02
 
 ### Added

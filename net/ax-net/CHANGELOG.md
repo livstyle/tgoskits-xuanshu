@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.11.0...ax-net-v0.11.1) - 2026-07-02
+
+### Other
+
+- updated the following local packages: ax-hal, ax-hal, ax-task, ax-task, ax-sync
+
 ## [0.11.0](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.10.0...ax-net-v0.11.0) - 2026-07-02
 
 ### Added
