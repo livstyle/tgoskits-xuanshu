@@ -25,7 +25,10 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+use alloc::vec::Vec;
+
 use ax_errno::{AxResult, ax_err};
+use axvm_types::{GuestPhysAddr, HostVirtAddr};
 
 #[cfg(all(feature = "vmx", feature = "svm"))]
 compile_error!("features `vmx` and `svm` are mutually exclusive");
@@ -45,13 +48,26 @@ pub struct X86PassthroughPortRange {
     pub length: u16,
 }
 
+/// Guest RAM region backing for x86 vCPU helpers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct X86GuestMemoryRegion {
+    /// Guest physical start address.
+    pub gpa: GuestPhysAddr,
+    /// Host virtual start address backing the guest memory.
+    pub hva: HostVirtAddr,
+    /// Region size in bytes.
+    pub size: usize,
+}
+
 /// x86 vCPU setup configuration.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct X86VCpuSetupConfig {
     /// Intercept COM1 PIO ports and route them to an emulated serial device.
     pub emulate_com1: bool,
     /// Host I/O port ranges routed through AxVM passthrough port devices.
     pub passthrough_ports: [Option<X86PassthroughPortRange>; X86_MAX_PASSTHROUGH_PORT_RANGES],
+    /// Guest RAM regions used by the VMX instruction decoder to read guest bytes.
+    pub guest_memory_regions: Vec<X86GuestMemoryRegion>,
 }
 
 impl Default for X86VCpuSetupConfig {
@@ -59,6 +75,7 @@ impl Default for X86VCpuSetupConfig {
         Self {
             emulate_com1: false,
             passthrough_ports: [None; X86_MAX_PASSTHROUGH_PORT_RANGES],
+            guest_memory_regions: Vec::new(),
         }
     }
 }

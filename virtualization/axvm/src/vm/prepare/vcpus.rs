@@ -130,6 +130,15 @@ impl PreparedVcpus {
                         .emu_devices()
                         .iter()
                         .any(|dev| dev.emu_type == EmulatedDeviceType::Console),
+                    guest_memory_regions: resources
+                        .memory_regions
+                        .iter()
+                        .map(|region| x86_vcpu::X86GuestMemoryRegion {
+                            gpa: region.gpa,
+                            hva: region.hva,
+                            size: region.size(),
+                        })
+                        .collect(),
                     ..Default::default()
                 };
                 for port in resources.config.pass_through_ports() {

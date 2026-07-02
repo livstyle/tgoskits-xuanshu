@@ -271,9 +271,13 @@ impl BuildInfo {
 
         if self.max_cpu_num.is_some_and(|max_cpu_num| max_cpu_num > 1) {
             self.features.push("smp".to_string());
+            self.features.push("ipi".to_string());
         }
         if plat_dyn {
-            self.features.push("smp".to_string());
+            if self.max_cpu_num != Some(1) {
+                self.features.push("smp".to_string());
+                self.features.push("ipi".to_string());
+            }
             self.features.push("plat-dyn".to_string());
             self.features.push("ax-driver/plat-dyn".to_string());
         } else if !has_myplat_feature(&self.features)
@@ -376,8 +380,11 @@ impl BuildInfo {
                 .push(format!("{}defplat", prefix_family.prefix()));
         }
 
-        if self.max_cpu_num.is_some_and(|max_cpu_num| max_cpu_num > 1) {
+        if self.max_cpu_num.is_some_and(|max_cpu_num| max_cpu_num > 1)
+            || (plat_dyn && self.max_cpu_num != Some(1))
+        {
             self.features.push(format!("{}smp", prefix_family.prefix()));
+            self.features.push(format!("{}ipi", prefix_family.prefix()));
         }
         self.push_platform_feature(target, plat_dyn, has_myplat, metadata);
 
