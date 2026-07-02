@@ -35,6 +35,7 @@ pub enum ElfLoadError {
     SegmentNotPageAligned,
     AllocateFailed,
     EntryNotInLoadSegment,
+    RequestedEntrySymbolMissing,
     UnsupportedEntrySymbol,
 }
 
@@ -143,23 +144,18 @@ fn load_elf(image: &[u8], entry_symbol: Option<&str>) -> Result<LoadedElf, ElfLo
     }
 
     let (entry, handoff) = match entry_symbol {
-        Some("httpboot_entry") => {
-            if let Some(entry) = find_symbol(image, &header, "httpboot_entry")
+        Some("httpboot_entry") => (
+            find_symbol(image, &header, "httpboot_entry")
                 .and_then(|symbol| virtual_to_physical(symbol, &segments))
-            {
-                (entry, EntryHandoff::BootInfo)
-            } else if let Some(entry) = find_symbol(image, &header, "__x86_64_efi_pe_entry")
+                .ok_or(ElfLoadError::RequestedEntrySymbolMissing)?,
+            EntryHandoff::BootInfo,
+        ),
+        Some("__x86_64_efi_pe_entry") => (
+            find_symbol(image, &header, "__x86_64_efi_pe_entry")
                 .and_then(|symbol| virtual_to_physical(symbol, &segments))
-            {
-                (entry, EntryHandoff::Uefi)
-            } else {
-                (
-                    virtual_to_physical(header.e_entry, &segments)
-                        .ok_or(ElfLoadError::EntryNotInLoadSegment)?,
-                    EntryHandoff::Uefi,
-                )
-            }
-        }
+                .ok_or(ElfLoadError::RequestedEntrySymbolMissing)?,
+            EntryHandoff::Uefi,
+        ),
         Some(_) => return Err(ElfLoadError::UnsupportedEntrySymbol),
         None => (
             virtual_to_physical(header.e_entry, &segments)
@@ -201,7 +197,7 @@ fn allocate_load_region(
         Ok(target) => Ok((target, preferred_load_addr)),
         Err(_) => {
             crate::logln!(
-                "elf_load_relocate: preferred={:#x} pages={}",
+                "elf_load_bias: preferred={:#x} pages={}",
                 preferred_load_addr,
                 page_count
             );
