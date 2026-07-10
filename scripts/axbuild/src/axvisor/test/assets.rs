@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::Context;
@@ -43,6 +44,67 @@ pub(super) fn arceos_x86_64_guest_elf_path(workspace_root: &Path, debug: bool) -
 
 pub(super) fn arceos_x86_64_guest_bin_path(workspace_root: &Path) -> PathBuf {
     arceos_x86_64_guest_elf_path(workspace_root, false).with_extension("bin")
+}
+
+const ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE: &str = "qemu-aarch64";
+const ARCEOS_AARCH64_SMOKE_GUEST_KERNEL: &str = "arceos/arceos-qemu";
+
+pub(super) fn arceos_aarch64_smoke_guest_image_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(format!(
+        "os/axvisor/images/{ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE}/{ARCEOS_AARCH64_SMOKE_GUEST_KERNEL}"
+    ))
+}
+
+pub(super) fn vmconfigs_need_arceos_aarch64_smoke_guest(
+    request: &ResolvedAxvisorRequest,
+    vmconfigs: &[PathBuf],
+) -> bool {
+    request.arch == "aarch64"
+        && vmconfigs.iter().any(|path| {
+            path.to_string_lossy().contains("arceos-rt-smp1-smoke")
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains("arceos-rt-smp1-smoke"))
+        })
+}
+
+pub(super) fn ensure_arceos_aarch64_smoke_guest_image(workspace_root: &Path) -> anyhow::Result<()> {
+    let image_path = arceos_aarch64_smoke_guest_image_path(workspace_root);
+    if image_path.is_file() {
+        return Ok(());
+    }
+
+    if let Some(parent) = image_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create ArceOS smoke guest image directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let output_dir = workspace_root.join("os/axvisor/images");
+    let status = Command::new("cargo")
+        .args([
+            "xtask",
+            "image",
+            "pull",
+            ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE,
+            "--output-dir",
+        ])
+        .arg(&output_dir)
+        .current_dir(workspace_root)
+        .status()
+        .context("failed to spawn `cargo xtask image pull` for ArceOS smoke guest")?;
+    if !status.success() {
+        anyhow::bail!(
+            "`cargo xtask image pull {ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE}` failed"
+        );
+    }
+
+    ensure_file_exists(&image_path, "ArceOS smoke guest image")?;
+    Ok(())
 }
 
 pub(super) fn inject_arceos_x86_64_guest_image(
@@ -124,7 +186,9 @@ pub(super) fn case_needs_arceos_x86_64_guest(
     request: &ResolvedAxvisorRequest,
     case: &PreparedAxvisorQemuCase,
 ) -> bool {
-    build_group_needs_arceos_x86_64_guest(request) || case.case.case.name.contains("arceos")
+    request.arch == "x86_64"
+        && (build_group_needs_arceos_x86_64_guest(request)
+            || case.case.case.name.contains("arceos"))
 }
 
 pub(super) fn axvisor_case_asset_config() -> test_case::CaseAssetConfig {

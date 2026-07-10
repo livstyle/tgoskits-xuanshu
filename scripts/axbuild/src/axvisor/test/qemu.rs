@@ -12,7 +12,8 @@ use super::{
     assets::{
         arceos_x86_64_guest_elf_path, arceos_x86_64_guest_request, axvisor_case_asset_config,
         build_group_needs_arceos_x86_64_guest, case_needs_arceos_x86_64_guest,
-        inject_arceos_x86_64_guest_image,
+        ensure_arceos_aarch64_smoke_guest_image, inject_arceos_x86_64_guest_image,
+        vmconfigs_need_arceos_aarch64_smoke_guest,
     },
     discover_qemu_cases,
     discovery::{
@@ -132,6 +133,11 @@ impl Axvisor {
                 None,
             )?;
             build_group.cargo = build::load_cargo_config(&build_group.request)?;
+            let group_vmconfigs = qemu_group_vmconfigs(&build_group.request, &build_group.cargo)?;
+            if vmconfigs_need_arceos_aarch64_smoke_guest(&build_group.request, &group_vmconfigs)
+            {
+                ensure_arceos_aarch64_smoke_guest_image(self.app.workspace_root())?;
+            }
             if build_group_needs_arceos_x86_64_guest(&build_group.request) {
                 self.build_arceos_x86_64_guest_image()
                     .await
