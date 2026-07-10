@@ -17,6 +17,7 @@ host-test = [
     "axdevice/host-test",
 ]
 sstc = ["riscv_vcpu/sstc"]
+sched-cfs = ["ax-std/sched-cfs"]
 tls = ["ax-std/tls", "cpu-local/tls"]
 
 [dependencies]

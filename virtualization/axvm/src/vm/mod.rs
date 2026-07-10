@@ -1355,6 +1355,7 @@ impl AxVM {
             0,
             runtime.clone(),
             primary_task,
+            primary_vcpu.host_sched_priority(),
         );
         Ok(())
     }

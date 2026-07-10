@@ -16,6 +16,18 @@ info "Pulling guest images (linux + arceos)..."
 cargo axvisor image pull qemu_aarch64_linux --output-dir tmp/images
 cargo axvisor image pull qemu_aarch64_arceos --output-dir tmp/images
 
+if [[ -x scripts/task1/build-arceos-rt-guest.sh ]]; then
+  info "Building custom rt-latency guest image (optional)..."
+  if scripts/task1/build-arceos-rt-guest.sh; then
+    RT_GUEST_IMAGE="../images/qemu_aarch64_arceos_rt/qemu-aarch64-rt-latency-bench"
+  else
+    warn_rt=1
+    RT_GUEST_IMAGE="../images/qemu_aarch64_arceos/qemu-aarch64"
+  fi
+else
+  RT_GUEST_IMAGE="../images/qemu_aarch64_arceos/qemu-aarch64"
+fi
+
 info "Preparing board + guest VM configs..."
 cp configs/board/qemu-aarch64.toml tmp/configs/
 cp configs/vms/qemu/aarch64/linux-smp2.toml tmp/configs/linux-aarch64-qemu-smp2.toml
@@ -27,9 +39,12 @@ sed -i 's|^kernel_path = .*|kernel_path = "../images/qemu_aarch64_linux/qemu-aar
 sed -i 's|^image_location = "fs"|image_location = "memory"|g' \
   tmp/configs/linux-aarch64-qemu-smp2.toml
 
-# RT guest: default to pulled arceos image until custom rt-latency guest is built.
-sed -i 's|^kernel_path = .*|kernel_path = "../images/qemu_aarch64_arceos/qemu-aarch64"|g' \
+# RT guest: prefer custom rt-latency image when build succeeded.
+sed -i 's|^kernel_path = .*|kernel_path = '"${RT_GUEST_IMAGE}"'|g' \
   tmp/configs/arceos-rt-aarch64-qemu-smp1.toml
+if [[ "${warn_rt:-0}" == 1 ]]; then
+  info "rt-latency guest build failed; using pulled generic arceos image"
+fi
 
 ROOTFS_PATH="$(pwd)/tmp/images/qemu_aarch64_linux/rootfs.img"
 sed -i 's|^  # "-drive",$|  "-drive",|g' tmp/configs/qemu-aarch64-runtime.toml

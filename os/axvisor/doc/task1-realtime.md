@@ -10,7 +10,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **阶段一** | 基线复现、测量框架、linux-smp2、裸机 RTOS 基线 | ✅ 已启动 |
-| **阶段二** | vCPU 优先级/抢占、pCPU 独占强化、vGIC/定时器优化 | 🔜 待实施 |
+| **阶段二** | vCPU 优先级/抢占、pCPU 独占强化、vGIC/定时器优化 | 🚧 进行中 |
 | **阶段三** | 30min 长稳、stress 矩阵、改造前后对比报告 | 🔜 待阶段二 |
 
 ---
@@ -65,6 +65,24 @@ cargo xtask arceos test qemu --arch aarch64 -g rust -c rt-latency
 RT_LATENCY mode=bare period_ms=1 samples=200 mean_jitter_ns=... p99_jitter_ns=... max_jitter_ns=...
 RT_LATENCY mode=bare period_ms=10 samples=200 ...
 RT_LATENCY_PASS
+```
+
+### 3.4 阶段二：vCPU 优先级（已实现）
+
+VM 配置 `[base]` 新增 `vcpu_priorities`（Linux CFS nice，`-20` 最高）：
+
+| 客户机 | 配置 | nice |
+|---|---|---|
+| `linux-smp2.toml` | `vcpu_priorities = [10, 10]` | 低于默认 |
+| `arceos-rt-smp1.toml` | `vcpu_priorities = [-20]` | 实时域最高 |
+
+宿主启用 `sched-cfs`；`build_vcpu_task` 经 `spawn_vcpu_task` 在创建后调用 `set_task_priority`。
+中断入队路径对目标 vCPU 任务额外 `wake_task`，减少 Halt 等待延迟。
+
+构建 RT 客户机 `rt-latency` 镜像：
+
+```bash
+cd os/axvisor && ./scripts/task1/build-arceos-rt-guest.sh
 ```
 
 ---
@@ -125,11 +143,11 @@ stress-ng --cpu 2 --vm 1 --fork 4 --timeout 1800s
 
 | 改造项 | 涉及路径 | 保底方案 |
 |---|---|---|
-| vCPU 静态优先级 | `axvmconfig`、`axvm/runtime/vcpus.rs`、`axtask` | pCPU 独占（已配置） |
-| 启用可抢占调度 | `os/axvisor/Cargo.toml` → `sched-rr` 或优先级调度 | 仅 cpumask |
-| vGIC 注入路径优化 | `virtualization/arm_vgic/` | 保持现有软件注入 |
-| arch timer 直访 | `virtualization/arm_vcpu/` | 虚拟 tick |
-| Hypervisor 后台任务绑核 | `os/axvisor/src/task.rs` | 文档约束 |
+| vCPU 静态优先级 | `axvmconfig`、`axvm/runtime/vcpus.rs`、`axtask` | ✅ `vcpu_priorities` + CFS nice |
+| 启用可抢占调度 | `os/axvisor/Cargo.toml`、`axvm/Cargo.toml` → `sched-cfs` | ✅ 已启用 |
+| vGIC 注入路径优化 | `virtualization/arm_vgic/` | ⚠️ 保持现有；已加 vCPU wake |
+| arch timer 直访 | `virtualization/arm_vcpu/` | 🔜 待实施 |
+| Hypervisor 后台任务绑核 | `os/axvisor/src/task.rs` | ✅ pCPU0 管理域 |
 
 ---
 
