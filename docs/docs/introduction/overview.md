@@ -86,7 +86,7 @@ tgoskits/
 ├── os/
 │   ├── arceos/                # ArceOS 模块化 unikernel
 │   │   ├── modules/           # 17 个内核模块（axhal, axtask, axmm...）
-│   │   ├── api/               # API 聚合层（arceos_api, posix_api, axfeat）
+│   │   ├── api/               # API 聚合层（arceos_api, posix_api, feature）
 │   │   ├── ulib/              # 用户态库（axstd, axlibc）
 │   │   └── examples/          # 内置示例（helloworld, shell, http*）
 │   ├── StarryOS/              # StarryOS Linux 兼容系统
@@ -127,7 +127,7 @@ flowchart LR
     subgraph api["API 聚合层"]
         arceos_api["arceos_api"]
         posix_api["arceos_posix_api"]
-        axfeat["axfeat"]
+        feature["feature"]
     end
     subgraph mods["内核模块 (17)"]
         hal["axhal"]
@@ -146,7 +146,7 @@ flowchart LR
 | 层次 | 内容 | 职责 |
 |------|------|------|
 | 内核模块 (`modules/`) | `axhal`, `axtask`, `axmm`, `axdriver`, `axfs`, `axnet`, `axsync`, `axlog`, `axruntime` 等 | 硬件抽象、调度、内存管理、设备驱动、文件系统、网络栈 |
-| API 聚合层 (`api/`) | `arceos_api`, `arceos_posix_api`, `axfeat` | 向上提供统一 API 接口与 feature 开关 |
+| API 聚合层 (`api/`) | `arceos_api`, `arceos_posix_api`, `feature` | 向上提供统一 API 接口与 feature 开关 |
 | 用户态库 (`ulib/`) | `axstd`, `axlibc` | Rust 标准库子集与 C 库兼容层 |
 
 → 开发指南：[ArceOS 开发指南](/docs/development/arceos) | 架构说明：[ArceOS 架构](/docs/architecture/arceos)
@@ -278,4 +278,4 @@ flowchart LR
 | `cargo xtask axvisor <sub>` | Axvisor 构建/运行/QEMU/U-Boot/板级测试 | `cargo xtask axvisor test qemu --target aarch64` |
 | `cargo xtask board <sub>` | 远程开发板管理 | `cargo xtask board list` |
 
-→ 命令体系详解：[构建流程](/docs/build) | [命令总览](/docs/build/commands)
+→ 命令体系详解：[构建概述](/docs/build/overview) | [命令索引](/docs/build/commands)

@@ -4,7 +4,7 @@ use std::{
     process::Command as StdCommand,
 };
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use log::warn;
 use ostool::{
@@ -134,8 +134,6 @@ pub struct ArgsBuild {
     pub arch: Option<String>,
     #[arg(short, long)]
     pub target: Option<String>,
-    #[arg(long = "plat_dyn", alias = "plat-dyn")]
-    pub plat_dyn: Option<bool>,
 
     #[arg(long, value_name = "CPUS")]
     pub smp: Option<usize>,
@@ -216,7 +214,6 @@ impl From<&ArgsBuild> for BuildCliArgs {
             package: args.package.clone(),
             arch: args.arch.clone(),
             target: args.target.clone(),
-            plat_dyn: args.plat_dyn,
             smp: args.smp,
             debug: args.debug,
         }
@@ -289,7 +286,6 @@ impl ArceOS {
     }
 
     async fn board(&mut self, args: ArgsBoard) -> anyhow::Result<()> {
-        board::reject_static_board_args(&args)?;
         let request =
             self.prepare_request((&args.build).into(), None, None, SnapshotPersistence::Store)?;
         self.run_board_request(
@@ -385,13 +381,7 @@ impl ArceOS {
         }
     }
 
-    fn reject_static_board_request(request: &ResolvedBuildRequest) -> anyhow::Result<()> {
-        if request.plat_dyn == Some(false) {
-            anyhow::bail!(
-                "`arceos board` only supports dynamic platform builds; snapshot or CLI selected \
-                 `plat_dyn = false`"
-            );
-        }
+    fn validate_board_request(request: &ResolvedBuildRequest) -> anyhow::Result<()> {
         if request.build_info_path.exists() {
             board::load_build_file(&request.build_info_path)?;
         }
@@ -417,11 +407,25 @@ impl ArceOS {
         board_config_path: Option<PathBuf>,
         options: RunBoardOptions,
     ) -> anyhow::Result<()> {
-        Self::reject_static_board_request(&request)?;
+        self.run_board_request_with_extra_rustflags(request, board_config_path, options, &[])
+            .await
+    }
+
+    pub(super) async fn run_board_request_with_extra_rustflags(
+        &mut self,
+        request: ResolvedBuildRequest,
+        board_config_path: Option<PathBuf>,
+        options: RunBoardOptions,
+        extra_rustflags: &[&str],
+    ) -> anyhow::Result<()> {
+        Self::validate_board_request(&request)?;
         self.app.set_debug_mode(request.debug)?;
         match build::load_arceos_build_mode(&request.build_info_path)? {
             build::ArceosBuildMode::RustStd => {
-                let cargo = build::load_cargo_config(&request)?;
+                let mut cargo = build::load_cargo_config(&request)?;
+                if !extra_rustflags.is_empty() {
+                    crate::build::append_encoded_rustflags(&mut cargo, extra_rustflags);
+                }
                 let board_config = self
                     .load_board_config(&cargo, board_config_path.as_deref())
                     .await?;
@@ -430,6 +434,9 @@ impl ArceOS {
                     .await
             }
             build::ArceosBuildMode::AppC { app_dir, app_name } => {
+                if !extra_rustflags.is_empty() {
+                    bail!("ArceOS board extra rustflags are only supported for RustStd packages");
+                }
                 let request = c_app_internal_request(&request);
                 let cargo = build::load_c_app_cargo_config(&request)?;
                 let board_config = self
@@ -648,30 +655,6 @@ mod tests {
     }
 
     #[test]
-    fn board_rejects_static_platform_override() {
-        let args = ArgsBoard {
-            build: ArgsBuild {
-                config: Some(PathBuf::from("build.toml")),
-                package: None,
-                arch: None,
-                target: None,
-                plat_dyn: Some(false),
-                smp: None,
-                debug: false,
-            },
-            board_config: None,
-            board_type: None,
-            server: None,
-            port: None,
-        };
-
-        let err = board::reject_static_board_args(&args)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("dynamic platform"));
-    }
-
-    #[test]
     fn qemu_runtime_disk_images_finds_disk_img_drive_paths() {
         let qemu = QemuConfig {
             args: vec![
@@ -722,7 +705,6 @@ body = "fixture"
             package: "arceos-httpclient".to_string(),
             arch: "x86_64".to_string(),
             target: "x86_64-unknown-none".to_string(),
-            plat_dyn: Some(true),
             smp: Some(1),
             debug: false,
             build_info_path: root.path().join("build.toml"),

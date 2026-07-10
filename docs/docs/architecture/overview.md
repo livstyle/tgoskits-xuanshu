@@ -15,7 +15,7 @@ flowchart TD
         C2["内存组件<br/>axaddrspace ax-memory-addr ax-memory-set ..."]
         C3["设备组件<br/>drivers/ axdevice ..."]
         C4["文件系统组件<br/>axfs_crates axfs-ng-vfs rsext4"]
-        C5["平台组件<br/>axplat_crates percpu ..."]
+        C5["平台契约<br/>ax-plat percpu ..."]
         C6["Starry 组件<br/>starry-process starry-signal starry-vm"]
         C7["虚拟化组件<br/>axvm axvm-types axvmconfig arch_vcpu axvisor_api"]
         C8["基础工具<br/>axerrno axio kernel_guard kspin ..."]
@@ -44,9 +44,9 @@ flowchart TD
 
     subgraph Platform["平台层"]
         direction LR
-        P1["axplat-dyn"]
-        P2["LoongArch static platform"]
-        P3["RISC-V board platforms"]
+        P1["axplat-dyn<br/>唯一内置平台实现"]
+        P2["somehal / someboot<br/>运行时平台事实来源"]
+        P3["外部自定义 ax-plat-*<br/>兼容边界，非内置维护路径"]
     end
 
     Components --> ArceOS
@@ -96,11 +96,17 @@ Axvisor 是基于 ArceOS 的统一组件化 Type-I Hypervisor，建立在 ArceOS
 
 ## 驱动框架重构方向
 
-宿主物理设备路径正在收敛到 `rdrive + rdif`。这个方向将静态平台、FDT 动态平台和未来 ACPI 平台放进同一套 `rdrive` 注册与 probe 主线，并让文件系统、网络、显示、输入、vsock、StarryOS 和 Axvisor 直接消费 `rdif-*` / `rd-*` 设备。
+宿主物理设备路径正在收敛到 `rdrive + rdif`。这个方向将 FDT/ACPI 等运行时发现来源和外部自定义平台适配放进同一套 `rdrive` 注册与 probe 主线，并让文件系统、网络、显示、输入、vsock、StarryOS 和 Axvisor 直接消费 `rdif-*` / `rd-*` 设备。
 
 本轮重构不迁移 `axdevice` / `axdevice_base`。它们继续作为 Axvisor / axvm 的 guest emulated device model，与宿主物理设备路径保持边界。
 
-→ 详细设计见 [rdrive + rdif 驱动框架](./rdrive-rdif)
+→ 详细设计见 [驱动框架](./driver/overview)
+
+## 平台层架构
+
+平台层位于 `platforms/`，把启动入口、内存布局、时钟、中断、控制台、电源、SMP 和设备发现事实接入 `ax-plat` / `ax-hal`。当前默认路径是 `axplat-dyn + somehal + someboot`，外部平台可以通过独立 `ax-plat` 实现接入，但需要自己维护启动、链接、IRQ、timer 和设备发现 glue。
+
+→ 详细设计见 [平台层架构](./platform/overview)
 
 ## 网络栈架构
 
@@ -123,7 +129,7 @@ TGOSKits 按职责将 crate 组织为六个核心层次和一个辅助层，每�
 
 辅助层：
 
-- `platforms/` — 平台实现，当前包含 `axplat-dyn` 和保留的 RISC-V / LoongArch 板级静态平台
+- `platforms/` — 平台实现，当前维护动态平台 `axplat-dyn`，详见 [平台层架构](./platform/overview)
 - `drivers/` — SoC 专用驱动（blk、net、npu、pci、soc）
 - `test-suit/` — 系统级测试入口（ArceOS、StarryOS、Axvisor）
 

@@ -46,6 +46,7 @@ model_register!(
 mod binding_info;
 mod binding_resolver;
 pub mod error;
+mod irq_binding;
 pub mod mmio;
 #[cfg(any(
     feature = "block",
@@ -83,10 +84,11 @@ pub mod serial;
 #[cfg(any(
     feature = "rockchip-soc",
     feature = "rockchip-pm",
-    feature = "rockchip-dwmmc"
+    feature = "rockchip-dwmmc",
+    feature = "starfive-soc"
 ))]
 pub mod soc;
-#[cfg(all(feature = "rtc", plat_dyn))]
+#[cfg(feature = "rtc")]
 pub mod time;
 #[cfg(feature = "usb")]
 pub mod usb;
@@ -95,12 +97,12 @@ pub mod virtio;
 
 #[cfg(feature = "pci")]
 pub use binding_info::PciIrqRequirement;
-pub use binding_info::{BindingInfo, BindingIrq, BindingIrqSource, FdtIrqSpec};
+pub use binding_info::{BindingInfo, BindingIrq, BindingIrqBinding, BindingIrqSource, FdtIrqSpec};
 #[cfg(feature = "pci")]
 pub use binding_resolver::binding_info_from_pci;
-#[cfg(feature = "plat-dyn")]
-pub use binding_resolver::binding_irq_from_named_fdt_interrupt;
 pub use binding_resolver::{
     binding_info_from_acpi, binding_info_from_acpi_route, binding_info_from_fdt,
+    binding_irq_from_named_fdt_interrupt,
 };
 pub use error::{Error, Result};
+pub use irq_binding::IrqBindingLease;

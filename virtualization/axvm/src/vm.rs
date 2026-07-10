@@ -22,16 +22,18 @@ use ax_cpumask::CpuMask;
 use ax_errno::{AxError, AxResult, ax_err, ax_err_type};
 use ax_kspin::SpinNoIrq as Mutex;
 use ax_memory_addr::align_up_4k;
-use axaddrspace::{AddrSpace, MappingFlags};
+use axaddrspace::AddrSpace;
 use axdevice::{AxVmDevices, FwCfg, FwCfgPlatformConfig};
 use axdevice_base::AccessWidth;
-use axvm_types::{GuestPhysAddr, HostPhysAddr, HostVirtAddr, VmArchVcpuOps, VmExit, VmVcpuState};
+use axvm_types::{
+    GuestPhysAddr, HostPhysAddr, HostVirtAddr, MappingFlags, NestedPagingConfig, VmVcpuState,
+};
 
 use crate::{
-    arch::{ArchOps, CurrentArch},
+    arch::ArchNestedPageTable,
     boot::{GuestBootDescription, GuestFdtBuilder},
     config::{AxVMConfig, PhysCpuList, VMInterruptMode},
-    host::paging::{HostPagingHandler, virt_to_phys},
+    host::paging::virt_to_phys,
     irq::InterruptFabric,
     layout::VmAddressLayout,
     lifecycle::{Machine, StopReason, VmLifecycleError, VmStatus},
@@ -49,7 +51,7 @@ const VM_ASPACE_SIZE: usize = 0x7fff_ffff_f000;
 /// A vCPU with architecture-independent interface.
 type VCpu = AxVCpu<crate::arch::ArchVCpu>;
 /// A reference to a vCPU.
-pub(crate) type AxVCpuRef = Arc<VCpu>;
+pub(crate) type AxVCpuRef<A = crate::arch::ArchVCpu> = Arc<AxVCpu<A>>;
 /// A reference to a VM.
 pub type AxVMRef = Arc<AxVM>;
 
@@ -64,7 +66,7 @@ pub struct VcpuSnapshot {
     pub phys_cpu_set: Option<usize>,
 }
 
-fn width_mask(width: AccessWidth) -> usize {
+pub(crate) fn width_mask(width: AccessWidth) -> usize {
     match width {
         AccessWidth::Byte => 0xff,
         AccessWidth::Word => 0xffff,
@@ -73,7 +75,7 @@ fn width_mask(width: AccessWidth) -> usize {
     }
 }
 
-fn sign_extend_value(value: usize, width: AccessWidth) -> usize {
+pub(crate) fn sign_extend_value(value: usize, width: AccessWidth) -> usize {
     match width {
         AccessWidth::Byte => (value as i8) as isize as usize,
         AccessWidth::Word => (value as i16) as isize as usize,
@@ -109,7 +111,8 @@ fn write_guest_bytes_to_chunks(chunks: &mut [&mut [u8]], data: &[u8]) -> AxResul
 
 pub(crate) struct AxVMResources {
     // Todo: use more efficient lock.
-    address_space: AddrSpace<HostPagingHandler>,
+    address_space: AddrSpace<ArchNestedPageTable>,
+    nested_paging: NestedPagingConfig,
     memory_regions: Vec<VMMemoryRegion>,
     config: AxVMConfig,
     phys_cpu_ls: PhysCpuList,
@@ -260,12 +263,22 @@ impl VmRuntimeHandle {
 
 impl AxVMResources {
     fn new(config: AxVMConfig) -> AxResult<Self> {
+        let vcpu_mappings = config.phys_cpu_ls.get_vcpu_affinities_pcpu_ids();
+        let page_table_levels = crate::arch::guest_page_table_levels(&vcpu_mappings)?;
+        let page_table = crate::arch::new_nested_page_table(page_table_levels)?;
+        let address_space = AddrSpace::new_empty(
+            page_table,
+            GuestPhysAddr::from(VM_ASPACE_BASE),
+            VM_ASPACE_SIZE,
+        )?;
+        let nested_paging = crate::arch::nested_paging_config(
+            address_space.page_table_root(),
+            page_table_levels,
+            &vcpu_mappings,
+        )?;
         Ok(Self {
-            address_space: AddrSpace::new_empty(
-                CurrentArch::max_guest_page_table_levels(),
-                GuestPhysAddr::from(VM_ASPACE_BASE),
-                VM_ASPACE_SIZE,
-            )?,
+            address_space,
+            nested_paging,
             memory_regions: Vec::new(),
             config,
             phys_cpu_ls: PhysCpuList::default(),
@@ -759,21 +772,6 @@ impl AxVM {
             .unwrap_or(0)
     }
 
-    /// Assert a routed LoongArch platform IRQ in the guest interrupt model.
-    #[cfg(target_arch = "loongarch64")]
-    pub(crate) fn loongarch_external_irq_vector(
-        &self,
-        fallback_vector: usize,
-        _physical_irq: usize,
-    ) -> Option<usize> {
-        let devices = self.get_devices().ok()?;
-        match devices.loongarch_pch_pic_assert_irq(fallback_vector) {
-            Some(Some(vector)) => Some(vector),
-            Some(None) => None,
-            None => Some(fallback_vector),
-        }
-    }
-
     /// Queue a QEMU fw_cfg device that will be attached during VM initialization.
     pub fn add_fw_cfg_device(&self, config: FwCfgDeviceConfig) -> AxResult {
         let mut pending = self.pending_fw_cfg.lock();
@@ -824,133 +822,12 @@ impl AxVM {
         Ok(())
     }
 
-    /// Run a vCPU according to the given vcpu_id.
-    ///
-    /// ## Arguments
-    /// * `vcpu_id` - the id of the vCPU to run.
-    ///
-    /// ## Returns
-    /// * `VmExit` - the exit reason of the vCPU, wrapped in an `AxResult`.
-    pub fn run_vcpu(&self, vcpu_id: usize) -> AxResult<VmExit> {
-        let vm_id = self.id();
-        let vcpu = self
-            .vcpu(vcpu_id)
-            .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
-
-        match vcpu.state() {
-            VmVcpuState::Free => vcpu.bind()?,
-            VmVcpuState::Ready => {}
-            state => {
-                return ax_err!(
-                    BadState,
-                    format!("VCpu state is not Free or Ready, but {state:?}")
-                );
-            }
-        }
-
-        let devices = self.get_devices()?;
-        let run_result = vcpu.with_current_cpu_set(|| -> AxResult<VmExit> {
-            loop {
-                crate::runtime::vcpus::inject_pending_interrupts(self.id(), vcpu_id, &vcpu);
-
-                let exit_reason = vcpu.run()?;
-                trace!("{exit_reason:#x?}");
-                match exit_reason {
-                    VmExit::MmioRead {
-                        addr,
-                        width,
-                        reg,
-                        reg_width,
-                        signed_ext,
-                    } => {
-                        let raw = devices.handle_mmio_read(addr, width)?;
-                        let masked = raw & width_mask(width);
-                        let val = if signed_ext {
-                            sign_extend_value(masked, width)
-                        } else {
-                            masked & width_mask(reg_width)
-                        };
-                        vcpu.set_gpr(reg, val);
-                    }
-                    VmExit::MmioWrite { addr, width, data } => {
-                        self.handle_mmio_write(addr, width, data as usize)?;
-                    }
-                    VmExit::IoRead { port, width } => {
-                        let val = devices.handle_port_read(port, width)?;
-                        CurrentArch::set_io_read_result(&vcpu, val);
-                    }
-                    VmExit::IoWrite { port, width, data } => {
-                        devices.handle_port_write(port, width, data as usize)?;
-                    }
-                    VmExit::SysRegRead { addr, reg } => {
-                        let val = devices.handle_sys_reg_read(
-                            addr,
-                            // Generally speaking, the width of system register is fixed and needless to be specified.
-                            // AccessWidth::Qword here is just a placeholder, may be changed in the future.
-                            AccessWidth::Qword,
-                        )?;
-                        vcpu.set_gpr(reg, val);
-                    }
-                    VmExit::SysRegWrite { addr, value } => {
-                        devices.handle_sys_reg_write(addr, AccessWidth::Qword, value as usize)?;
-                    }
-                    VmExit::NestedPageFault { addr, access_flags } => {
-                        if devices.find_mmio_dev(addr).is_some() {
-                            if let Some(mmio_exit) =
-                                vcpu.get_arch_vcpu().decode_mmio_fault(addr, access_flags)
-                            {
-                                match mmio_exit {
-                                    VmExit::MmioRead {
-                                        addr,
-                                        width,
-                                        reg,
-                                        reg_width,
-                                        signed_ext,
-                                    } => {
-                                        let raw = devices.handle_mmio_read(addr, width)?;
-                                        let masked = raw & width_mask(width);
-                                        let val = if signed_ext {
-                                            sign_extend_value(masked, width)
-                                        } else {
-                                            masked & width_mask(reg_width)
-                                        };
-                                        vcpu.set_gpr(reg, val);
-                                    }
-                                    VmExit::MmioWrite { addr, width, data } => {
-                                        self.handle_mmio_write(addr, width, data as usize)?;
-                                    }
-                                    exit_reason => break Ok(exit_reason),
-                                }
-                            } else {
-                                break Ok(VmExit::NestedPageFault { addr, access_flags });
-                            }
-                        } else if !self.handle_nested_page_fault(addr, access_flags) {
-                            break Ok(VmExit::NestedPageFault { addr, access_flags });
-                        }
-                    }
-                    exit_reason => break Ok(exit_reason),
-                }
-            }
-        });
-
-        let unbind_result = vcpu.unbind();
-        match run_result {
-            Ok(exit_reason) => {
-                unbind_result?;
-                Ok(exit_reason)
-            }
-            Err(err) => {
-                if let Err(unbind_err) = unbind_result {
-                    warn!(
-                        "VM[{vm_id}] VCpu[{vcpu_id}] unbind after run error failed: {unbind_err:?}"
-                    );
-                }
-                Err(err)
-            }
-        }
-    }
-
-    fn handle_mmio_write(&self, addr: GuestPhysAddr, width: AccessWidth, data: usize) -> AxResult {
+    pub(crate) fn handle_mmio_write(
+        &self,
+        addr: GuestPhysAddr,
+        width: AccessWidth,
+        data: usize,
+    ) -> AxResult {
         let devices = self.get_devices()?;
         if let Some(fw_cfg) = devices.fw_cfg_for_dma_addr(addr) {
             if let Some(desc_addr) = fw_cfg.write_dma_address(addr, width, data)? {
@@ -964,35 +841,15 @@ impl AxVM {
         }
 
         devices.handle_mmio_write(addr, width, data)?;
-        CurrentArch::after_mmio_write(self);
         Ok(())
     }
 
-    #[cfg(target_arch = "loongarch64")]
-    pub(crate) fn drain_loongarch_pch_pic_events(&self) {
-        let Ok(devices) = self.get_devices() else {
-            return;
-        };
-        devices.drain_loongarch_pch_pic_events(|event| {
-            if !event.asserted {
-                trace!(
-                    "LoongArch VM[{}] PCH-PIC deassert event for EIOINTC vector {}",
-                    self.id(),
-                    event.vector
-                );
-                return;
-            }
-            if let Err(err) = crate::manager::inject_vm_vcpu_interrupt(self.id(), 0, event.vector) {
-                warn!(
-                    "failed to inject LoongArch VM[{}] PCH-PIC output vector {}: {err:?}",
-                    self.id(),
-                    event.vector
-                );
-            }
-        });
-    }
-
-    fn handle_nested_page_fault(&self, addr: GuestPhysAddr, access_flags: MappingFlags) -> bool {
+    #[cfg(not(target_arch = "aarch64"))]
+    pub(crate) fn handle_nested_page_fault(
+        &self,
+        addr: GuestPhysAddr,
+        access_flags: MappingFlags,
+    ) -> bool {
         self.with_resources_mut(|resources| {
             let handled = resources
                 .address_space
@@ -1003,6 +860,7 @@ impl AxVM {
         .unwrap_or(false)
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
     fn debug_nested_page_fault(
         vm_id: usize,
         resources: &AxVMResources,
