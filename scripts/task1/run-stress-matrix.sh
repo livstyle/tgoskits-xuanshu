@@ -18,8 +18,8 @@ info "4) In Linux guest shell, start stress (example 30 min):"
 info "   stress-ng --cpu 2 --vm 1 --fork 4 --timeout 1800s"
 info "5) Observe RT guest serial for RT_LATENCY lines; redirect host log to CSV if needed."
 info
-info "For automated short comparison (200 samples), run from repo root:"
-info "   ${TGOSKITS_ROOT}/scripts/task1/collect-rt-latency-report.sh"
+info "For automated round-1 (idle compare + mixed stress long-run + report):"
+info "   ${TGOSKITS_ROOT}/scripts/task1/run-mixed-stress-round1.sh"
 info
 info "For 30-minute RT-only guest sampling, rebuild with long mode:"
 info "   cd ${TGOSKITS_ROOT}"
