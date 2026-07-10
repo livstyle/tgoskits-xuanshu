@@ -18,7 +18,7 @@ TGOSKits 的核心价值不仅在于将各仓库整合到同一工作区，更�
 | --- | --- | --- | --- |
 | `components/` | subtree 管理的独立可复用 crate | `ax-errno`、`ax-kspin`、`axvm`、`starry-process` | 三套系统都可能直接或间接使用 |
 | `os/arceos/modules/` | ArceOS 内核模块 | `ax-hal`、`ax-task`、`ax-net`、`ax-fs` | ArceOS，且经常被 StarryOS 和 Axvisor 复用 |
-| `os/arceos/api/` | feature 与对外 API 聚合 | `ax-feat`、`ax-api` | ArceOS 应用、StarryOS、Axvisor |
+| `os/arceos/api/` | feature 与对外 API 聚合 | `ax-runtime`、`ax-api` | ArceOS 应用、StarryOS、Axvisor |
 | `os/arceos/ulib/` | 用户侧库 | `ax-std`、`ax-libc` | ArceOS 示例与用户应用 |
 | `os/StarryOS/kernel/` | StarryOS 内核逻辑 | syscall、进程、内存、文件系统 | `starryos` 包 |
 | `os/axvisor/` | Hypervisor 运行时与配置 | `src/`、`configs/board/`、`configs/vms/` | Axvisor |
@@ -40,7 +40,7 @@ flowchart TD
     ArceosApps["ArceOS examples + test-suit/arceos"]
     StarryKernel["os/StarryOS/kernel + components/starry-*"]
     AxvisorRuntime["os/axvisor + virtualization/axvm/axvm-types/axdevice/*"]
-    PlatformCrates["components/axplat_crates/platforms/* + platform/*"]
+    PlatformCrates["platforms/*"]
 
     ReusableCrate --> ArceosModules
     ArceosModules --> ArceosApi
@@ -63,7 +63,7 @@ flowchart TD
    例如 `ax-hal`、`ax-task`、`ax-driver`、`ax-net`
 
 3. 通过平台和配置接到最终系统  
-   例如 `axplat-*`、`platforms/axplat-dyn`、Axvisor 的 `configs/board/*.toml`
+   例如内置动态平台 `platforms/axplat-dyn`、外部自定义 `ax-plat-*` 兼容包、Axvisor 的 `configs/board/*.toml`
 
 ### 2.1 依赖统计
 
@@ -91,11 +91,11 @@ flowchart TD
 | 你要改什么 | 优先看哪里 | 常见影响面 |
 | --- | --- | --- |
 | 通用基础能力：错误、锁、页表、Per-CPU、容器 | `components/axerrno`、`components/kspin`、`memory/page_table_multiarch`、`components/percpu` | 三套系统都可能受影响 |
-| ArceOS 内核服务：调度、HAL、驱动、网络、文件系统 | `os/arceos/modules/*`、`drivers/*`，以及相关 `memory/*` / `axplat_crates` | ArceOS，且可能波及 StarryOS / Axvisor |
-| ArceOS 的 feature 或应用接口 | `os/arceos/api/axfeat`、`os/arceos/ulib/axstd`、`os/arceos/ulib/axlibc` | ArceOS 应用与上层系统 |
+| ArceOS 内核服务：调度、HAL、驱动、网络、文件系统 | `os/arceos/modules/*`、`drivers/*`，以及相关 `memory/*` / `platforms/*` | ArceOS，且可能波及 StarryOS / Axvisor |
+| ArceOS 的 feature 或应用接口 | `os/arceos/api/feature`、`os/arceos/ulib/axstd`、`os/arceos/ulib/axlibc` | ArceOS 应用与上层系统 |
 | StarryOS 的 Linux 兼容行为 | `components/starry-*`、`os/StarryOS/kernel/*` | StarryOS |
 | Hypervisor、vCPU、虚拟设备、VM 管理 | `virtualization/axvm`、`virtualization/axvm-types`、`virtualization/*_vcpu`、`virtualization/axdevice`、`virtualization/axvisor_api`、`os/axvisor/src/*` | Axvisor |
-| 平台、板级适配或 VM 启动配置 | `components/axplat_crates/platforms/*`、`platform/*`、`os/axvisor/configs/*` | 一到多个系统 |
+| 平台、板级适配或 VM 启动配置 | `platforms/*`、`os/axvisor/configs/*` | 一到多个系统 |
 
 若不确定某个 crate 的维护者或来源仓库，可查看 `scripts/repo/repos.csv`，该文件记录了所有 subtree 组件的来源信息。
 
@@ -283,7 +283,7 @@ my_component = { path = "components/my_component" }
 
 ## 6. ArceOS 集成
 
-在 ArceOS 中集成组件的典型链路为：在 `components/` 或 `os/arceos/modules/` 实现复用逻辑，若需作为可选能力暴露则接入 `os/arceos/api/axfeat`，若需直接供应用使用则接入 `os/arceos/ulib/axstd` 或 `ax-libc`，最后通过 `apps/arceos/*` 或 `test-suit/arceos/*` 进行验证。
+在 ArceOS 中集成组件的典型链路为：在 `components/` 或 `os/arceos/modules/` 实现复用逻辑，若需作为可选能力暴露则接入 `os/arceos/api/feature`，若需直接供应用使用则接入 `os/arceos/ulib/axstd` 或 `ax-libc`，最后通过 `apps/arceos/*` 或 `test-suit/arceos/*` 进行验证。
 
 最常用的三个验证入口：
 
@@ -296,7 +296,7 @@ cargo xtask arceos run --package arceos-shell --arch riscv64 --blk
 各层适用场景：
 
 - 仅修改内部实现：通常只需修改 `components/` 或 `modules/`
-- 新增 feature 开关：修改 `os/arceos/api/axfeat`
+- 新增 feature 开关：修改 `os/arceos/api/feature`
 - 新增应用侧 API：修改 `os/arceos/ulib/axstd` 或 `ax-libc`
 - 新增示例：添加至 `apps/arceos/`
 
@@ -346,8 +346,8 @@ cargo xtask qemu \
 
 若修改涉及板级能力，还需同时关注：
 
-- `platforms/*`
 - `platforms/axplat-dyn`
+- 外部自定义 `ax-plat-*` 兼容包（若改动显式面向它们）
 - `os/axvisor/configs/board/*.toml`
 
 ## 9. 测试与质量检查

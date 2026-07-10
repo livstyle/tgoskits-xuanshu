@@ -17,38 +17,53 @@
 //! This module provides functionality for parsing and processing device tree blobs,
 //! including CPU configuration, passthrough device detection, and FDT generation.
 
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(test, target_arch = "aarch64", target_arch = "riscv64"))]
 mod create;
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(test, target_arch = "aarch64", target_arch = "riscv64"))]
 mod device;
 #[cfg(target_arch = "loongarch64")]
 pub(crate) mod loongarch64;
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(test, target_arch = "aarch64", target_arch = "riscv64"))]
 mod parser;
 mod print;
-pub(crate) mod vm_fdt;
+#[cfg(any(test, target_arch = "aarch64", target_arch = "riscv64"))]
+mod tree;
+
+#[cfg(test)]
+mod tree_tests;
 
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use alloc::format;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use alloc::vec::Vec;
 
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "loongarch64",
+    target_arch = "riscv64"
+))]
 use ax_errno::AxResult;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use ax_errno::ax_err_type;
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "loongarch64",
+    target_arch = "riscv64"
+))]
 use axvmconfig::{AxVMCrateConfig, VMBootProtocol};
 // pub use print::print_fdt;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub use create::update_fdt;
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-pub use device::build_all_node_paths;
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-use fdt_parser::Fdt;
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(test, target_arch = "aarch64", target_arch = "riscv64"))]
 pub use parser::*;
 
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use crate::boot::BootImageProvider;
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "loongarch64",
+    target_arch = "riscv64"
+))]
 use crate::config::AxVMConfig;
 
 /// Guest DTB artifact produced or patched by the monitor before AxVM owns it.
@@ -130,7 +145,7 @@ pub fn handle_fdt_operations(
     let mut guest_dtb = None;
 
     if let Some(host_fdt_bytes) = host_fdt_bytes {
-        let host_fdt = Fdt::from_bytes(host_fdt_bytes)
+        let host_fdt = fdt_edit::Fdt::from_bytes(host_fdt_bytes)
             .map_err(|e| ax_err_type!(InvalidData, format!("Failed to parse host FDT: {e:#?}")))?;
         set_phys_cpu_sets(vm_config, &host_fdt, vm_create_config)?;
 
@@ -141,7 +156,7 @@ pub fn handle_fdt_operations(
             reserve_excluded_device_ranges(vm_config, vm_create_config, &provided_dtb)?;
             guest_dtb = Some(GuestDtbImage::new(update_provided_fdt(
                 &provided_dtb,
-                host_fdt_bytes,
+                Some(host_fdt_bytes),
                 vm_create_config,
             )?));
         } else {
@@ -162,7 +177,7 @@ pub fn handle_fdt_operations(
         reserve_excluded_device_ranges(vm_config, vm_create_config, &provided_dtb)?;
         guest_dtb = Some(GuestDtbImage::new(update_provided_fdt(
             &provided_dtb,
-            &[],
+            None,
             vm_create_config,
         )?));
     } else {
@@ -176,7 +191,7 @@ pub fn handle_fdt_operations(
     if let Some(dtb) = guest_dtb.as_ref().map(GuestDtbImage::as_bytes) {
         parse_reserved_memory_regions(vm_create_config, dtb)?;
         parse_passthrough_devices_address(vm_config, vm_create_config, dtb)?;
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
         parse_vm_interrupt(vm_config, dtb)?;
     } else {
         error!(
