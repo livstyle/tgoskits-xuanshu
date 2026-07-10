@@ -15,9 +15,9 @@
 | M1.4 裸机抖动测量框架 | ✅ | `test-suit/arceos/rust` feature `rt-latency` |
 | M1.5 AxVisor linux-smp2 冒烟测试 | ✅ | `test-suit/axvisor/normal/qemu/linux-smp2/` |
 | M1.6 task1 脚本 | ✅ | `os/axvisor/scripts/task1/`、`scripts/task1/run-rt-baseline.sh` |
-| M2.1 vCPU 优先级抢占 | 🔜 | 阶段二 |
-| M2.2 vGIC/定时器优化 | 🔜 | 阶段二 |
-| M2.3 虚拟化 vs 裸机对比报告 | 🔜 | 阶段二数据收集后 |
+| M2.1 vCPU 优先级抢占 | ✅ | `vcpu_priorities` + `sched-cfs` |
+| M2.2 vGIC/定时器优化 | 🚧 | 中断 wake 已加；vGIC/直访待续 |
+| M2.3 虚拟化 vs 裸机对比报告 | 🚧 | 需 `build-arceos-rt-guest.sh` + 混合运行 |
 
 ---
 
@@ -54,9 +54,26 @@ cd os/axvisor && ./scripts/task1/setup-qemu-aarch64.sh && ./scripts/task1/run-mi
 
 ---
 
-## 下一步（阶段二）
+## 2026-07-10 阶段二落地内容
 
-1. 在 `axvmconfig` 增加 `vcpu_priorities`，`build_vcpu_task` 设置任务优先级
-2. AxVisor 启用 `sched-rr` 或实现 RT vCPU 抢占唤醒路径
-3. 在 AxVisor Guest 内复跑 `rt-latency`，生成改造前/后对比 CSV
-4. 补齐 RT-Thread QEMU 客户机配置
+### 调度改造
+
+- `axvmconfig::VMBaseConfig::vcpu_priorities`：per-vCPU CFS nice
+- `axvm::spawn_vcpu_task`：创建 vCPU 宿主任务后应用优先级
+- `axtask::set_task_priority`：支持为任意任务设置 nice
+- AxVisor / AxVM 启用 `sched-cfs`（可抢占 CFS）
+- `os/axvisor/src/task.rs`：管理任务绑 pCPU0
+- 中断 `queue_interrupt` 路径：`wake_task` 目标 vCPU
+
+### 配置
+
+- `linux-smp2.toml`：`vcpu_priorities = [10, 10]`
+- `arceos-rt-smp1.toml`：`vcpu_priorities = [-20]`
+
+### 脚本
+
+- `os/axvisor/scripts/task1/build-arceos-rt-guest.sh`：构建 memory 加载的 rt-latency 客户机
+
+---
+
+## 下一步（阶段二续 / 阶段三）

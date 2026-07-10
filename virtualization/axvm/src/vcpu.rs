@@ -34,6 +34,7 @@ struct AxVCpuInnerConst {
     vm_id: VMId,
     vcpu_id: VCpuId,
     phys_cpu_set: Option<usize>,
+    host_sched_priority: Option<i32>,
 }
 
 /// AxVM-owned architecture-independent vCPU wrapper.
@@ -49,6 +50,7 @@ impl<A: VmArchVcpuOps> AxVCpu<A> {
         vm_id: VMId,
         vcpu_id: VCpuId,
         phys_cpu_set: Option<usize>,
+        host_sched_priority: Option<i32>,
         arch_config: A::CreateConfig,
     ) -> AxResult<Self> {
         Ok(Self {
@@ -56,6 +58,7 @@ impl<A: VmArchVcpuOps> AxVCpu<A> {
                 vm_id,
                 vcpu_id,
                 phys_cpu_set,
+                host_sched_priority,
             },
             inner_mut: Mutex::new(AxVCpuInnerMut {
                 state: VmVcpuState::Created,
@@ -92,6 +95,11 @@ impl<A: VmArchVcpuOps> AxVCpu<A> {
     /// Returns the allowed physical CPU mask.
     pub const fn phys_cpu_set(&self) -> Option<usize> {
         self.inner_const.phys_cpu_set
+    }
+
+    /// Returns the configured host scheduler nice value for this vCPU.
+    pub const fn host_sched_priority(&self) -> Option<i32> {
+        self.inner_const.host_sched_priority
     }
 
     /// Returns the current vCPU state.

@@ -30,6 +30,7 @@ impl PreparedVcpus {
 
         let mut vcpus = Vec::with_capacity(vcpu_id_pcpu_sets.len());
         for (vcpu_id, phys_cpu_set, phys_cpu_id) in vcpu_id_pcpu_sets {
+            let host_sched_priority = resources.config.phys_cpu_ls.vcpu_priority(vcpu_id);
             let arch_config = CurrentArch::build_vcpu_create_config(
                 &create_state,
                 VcpuCreateContext {
@@ -48,6 +49,7 @@ impl PreparedVcpus {
                 vm_id,
                 vcpu_id,
                 phys_cpu_set,
+                host_sched_priority,
                 arch_config,
             )?));
         }

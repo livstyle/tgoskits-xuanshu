@@ -45,6 +45,7 @@ ax-std = { workspace = true, features = [
     "smp",
     "hv",
     "wake-ipi",
+    "sched-cfs",
 ] }
 ax-hal = { workspace = true, features = ["ipi"] }
 ax-timer-list = { workspace = true }

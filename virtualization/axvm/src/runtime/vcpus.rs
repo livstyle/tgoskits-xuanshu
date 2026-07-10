@@ -95,10 +95,16 @@ pub(crate) fn queue_interrupt(vm_id: usize, vcpu_id: usize, vector: usize) -> Ax
     }
 
     let cpu_id = vm.with_runtime(|runtime| runtime.queue_interrupt(vcpu_id, vector))?;
+    let vcpu_task = vm.with_runtime(|runtime| {
+        runtime
+            .vcpu_task_ref(vcpu_id)
+            .ok_or_else(|| ax_err_type!(NotFound, format!("vCPU {vcpu_id} task not found")))
+    })?;
     vm.with_runtime(|runtime| {
         runtime.notify_all();
         Ok(())
     })?;
+    crate::host::task::wake_task(&vcpu_task);
     crate::host::task::send_ipi(cpu_id);
     Ok(())
 }
@@ -121,10 +127,16 @@ pub(crate) fn queue_external_interrupt(
 
     let cpu_id =
         vm.with_runtime(|runtime| runtime.queue_external_interrupt(vcpu_id, vector, physical_irq))?;
+    let vcpu_task = vm.with_runtime(|runtime| {
+        runtime
+            .vcpu_task_ref(vcpu_id)
+            .ok_or_else(|| ax_err_type!(NotFound, format!("vCPU {vcpu_id} task not found")))
+    })?;
     vm.with_runtime(|runtime| {
         runtime.notify_all();
         Ok(())
     })?;
+    crate::host::task::wake_task(&vcpu_task);
     crate::host::task::send_ipi(cpu_id);
     Ok(())
 }
@@ -209,7 +221,32 @@ fn vcpu_on(vm: VMRef, vcpu_id: usize, entry_point: GuestPhysAddr, arg: usize) ->
 }
 
 pub(crate) fn alloc_vcpu_task(vm: &VMRef, vcpu: VCpuRef) -> crate::AxTaskRef {
-    crate::host::task::spawn_task(build_vcpu_task(vm, vcpu))
+    spawn_vcpu_task(vm, vcpu)
+}
+
+pub(crate) fn spawn_vcpu_task(vm: &VMRef, vcpu: VCpuRef) -> crate::AxTaskRef {
+    let vcpu_id = vcpu.id();
+    let priority = vcpu.host_sched_priority();
+    let vcpu_task = build_vcpu_task(vm, vcpu);
+    let task_ref = crate::host::task::spawn_task(vcpu_task);
+    if let Some(priority) = priority {
+        if crate::host::task::set_task_priority(&task_ref, priority as isize) {
+            info!(
+                "VM[{}] VCpu[{}] host nice set to {}",
+                vm.id(),
+                vcpu_id,
+                priority
+            );
+        } else {
+            warn!(
+                "VM[{}] VCpu[{}] failed to apply host nice {}",
+                vm.id(),
+                vcpu_id,
+                priority
+            );
+        }
+    }
+    task_ref
 }
 
 pub(crate) fn build_vcpu_task(vm: &VMRef, vcpu: VCpuRef) -> crate::TaskInner {

@@ -33,6 +33,7 @@ mod banner;
 mod config;
 mod manager;
 mod shell;
+mod task;
 
 /// Axvisor kernel entry point.
 ///
@@ -44,6 +45,8 @@ mod shell;
 /// 4. Enter the management shell after the default guests have exited.
 fn main() {
     banner::print_logo();
+
+    task::init_host_task_affinity();
 
     info!("Starting virtualization...");
     let manager = manager::AxvmManager::new().expect("failed to initialize AxVM manager");

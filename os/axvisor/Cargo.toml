@@ -42,6 +42,7 @@ required-features = ["axtest"]
 [features]
 default = []
 axtest = []
+sched-cfs = ["ax-std/sched-cfs"]
 ept-level-4 = ["axvm/4-level-ept"]
 fs = ["ax-std/ext4fs", "ax-std/fatfs", "axvm/host-fs"]
 vmx = ["axvm/vmx"]
@@ -66,7 +67,7 @@ spin = { workspace = true }
 log = "0.4"
 
 # System dependent modules provided by ArceOS.
-ax-std = { workspace = true, features = ["ext-ld", "paging", "irq", "multitask", "task-ext", "smp", "hv", "plat-dyn"] }
+ax-std = { workspace = true, features = ["ext-ld", "paging", "irq", "multitask", "task-ext", "smp", "hv", "plat-dyn", "sched-cfs"] }
 ax-hal = { workspace = true, features = ["paging", "irq", "smp", "hv", "axvisor-linker"] }
 # System dependent modules provided by ArceOS-Hypervisor (bare-metal only)
 # ax-runtime = { version = "=0.3.0-preview.1", features = ["alloc", "irq", "paging", "smp", "multitask"] }

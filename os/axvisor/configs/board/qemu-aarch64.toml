@@ -2,6 +2,7 @@ features = [
     "ept-level-4",
     "ax-driver/virtio-blk",
     "fs",
+    "sched-cfs",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"

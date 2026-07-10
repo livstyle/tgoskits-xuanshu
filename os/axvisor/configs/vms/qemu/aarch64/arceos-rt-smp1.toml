@@ -9,6 +9,7 @@ name = "arceos-rt-qemu"
 vm_type = 1
 cpu_num = 1
 phys_cpu_ids = [3]
+vcpu_priorities = [-20]
 
 [kernel]
 entry_point = 0x8020_0000

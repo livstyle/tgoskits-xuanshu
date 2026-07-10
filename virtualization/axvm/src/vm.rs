@@ -153,6 +153,10 @@ impl VmRuntimeHandle {
         self.pending_interrupts.lock().entry(vcpu_id).or_default();
     }
 
+    pub(crate) fn vcpu_task_ref(&self, vcpu_id: usize) -> Option<crate::AxTaskRef> {
+        self.vcpu_task_list.lock().get(&vcpu_id).cloned()
+    }
+
     pub(crate) fn queue_interrupt(&self, vcpu_id: usize, vector: usize) -> AxResult<usize> {
         let task = self
             .vcpu_task_list
@@ -583,7 +587,6 @@ impl AxVM {
         let primary_vcpu = self
             .vcpu(0)
             .ok_or_else(|| ax_err_type!(BadState, "VM primary vCPU is not prepared"))?;
-        let primary_task = crate::runtime::vcpus::build_vcpu_task(self, primary_vcpu);
         let runtime = Arc::new(VmRuntimeHandle::new());
 
         self.machine
@@ -602,7 +605,7 @@ impl AxVM {
             })
             .map_err(VmLifecycleError::into_ax_error)?;
 
-        let task = crate::host::task::spawn_task(primary_task);
+        let task = crate::runtime::vcpus::spawn_vcpu_task(self, primary_vcpu);
         runtime.add_vcpu_task(0, task);
         Ok(())
     }
