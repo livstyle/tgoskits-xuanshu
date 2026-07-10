@@ -63,6 +63,8 @@ pub struct ArmVcpu<H: ArmHostOps> {
     guest_system_regs: GuestSystemRegisters,
     /// The MPIDR_EL1 value for the vCPU.
     mpidr: u64,
+    /// When set, guest timer/counter registers are not saved or restored on VM exit.
+    passthrough_timer: bool,
     _host: PhantomData<fn() -> H>,
 }
 
@@ -98,12 +100,14 @@ impl<H: ArmHostOps> ArmVcpu<H> {
             host: HostRuntimeContext::default(),
             guest_system_regs: GuestSystemRegisters::default(),
             mpidr: config.mpidr_el1,
+            passthrough_timer: false,
             _host: PhantomData,
         })
     }
 
     /// Completes architecture-specific setup.
     pub fn setup(&mut self, config: ArmVcpuSetupConfig) -> ArmVcpuResult {
+        self.passthrough_timer = config.passthrough_timer;
         self.init_hv(config);
         Ok(())
     }
@@ -196,7 +200,17 @@ impl<H: ArmHostOps> ArmVcpu<H> {
         let cntpct: u64;
         unsafe { core::arch::asm!("mrs {0}, CNTPCT_EL0", out(reg) cntpct) };
         self.guest_system_regs.cntvoff_el2 = cntpct;
-        self.guest_system_regs.cntkctl_el1 = 0;
+        self.guest_system_regs.cntkctl_el1 = if config.passthrough_timer {
+            // Allow EL0 counter/timer access so guest RTOS threads can use CNTV/CNTP
+            // without trapping to EL2 on every tick.
+            (CNTKCTL_EL1::EL0PCTEN::TrappedNone
+                + CNTKCTL_EL1::EL0VCTEN::TrappedNone
+                + CNTKCTL_EL1::EL0PTEN::TrappedNone
+                + CNTKCTL_EL1::EL0VTEN::TrappedNone)
+                .value as u32
+        } else {
+            0
+        };
         self.guest_system_regs.cnthctl_el2 = if config.passthrough_timer {
             (CNTHCTL_EL2::EL1PCEN::SET + CNTHCTL_EL2::EL1PCTEN::SET).into()
         } else {
@@ -302,7 +316,7 @@ impl<H: ArmHostOps> ArmVcpu<H> {
                 mov x3, xzr           // Trap nothing from EL1 to El2.
                 msr cptr_el2, x3"
             );
-            self.guest_system_regs.restore();
+            self.guest_system_regs.restore(!self.passthrough_timer);
             core::arch::asm!(
                 "
                 ic  iallu
@@ -333,7 +347,7 @@ impl<H: ArmHostOps> ArmVcpu<H> {
         unsafe {
             // Store guest system regs. Guest SP_EL0 was already saved into `self.ctx`
             // by the EL2 assembly before host SP_EL0 was restored.
-            self.guest_system_regs.store();
+            self.guest_system_regs.store(!self.passthrough_timer);
         }
 
         let result = match exit_reason {

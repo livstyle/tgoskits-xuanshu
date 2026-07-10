@@ -134,8 +134,7 @@ impl Axvisor {
             )?;
             build_group.cargo = build::load_cargo_config(&build_group.request)?;
             let group_vmconfigs = qemu_group_vmconfigs(&build_group.request, &build_group.cargo)?;
-            if vmconfigs_need_arceos_aarch64_smoke_guest(&build_group.request, &group_vmconfigs)
-            {
+            if vmconfigs_need_arceos_aarch64_smoke_guest(&build_group.request, &group_vmconfigs) {
                 ensure_arceos_aarch64_smoke_guest_image(self.app.workspace_root())?;
             }
             if build_group_needs_arceos_x86_64_guest(&build_group.request) {

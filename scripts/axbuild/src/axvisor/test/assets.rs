@@ -98,9 +98,7 @@ pub(super) fn ensure_arceos_aarch64_smoke_guest_image(workspace_root: &Path) -> 
         .status()
         .context("failed to spawn `cargo xtask image pull` for ArceOS smoke guest")?;
     if !status.success() {
-        anyhow::bail!(
-            "`cargo xtask image pull {ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE}` failed"
-        );
+        anyhow::bail!("`cargo xtask image pull {ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE}` failed");
     }
 
     ensure_file_exists(&image_path, "ArceOS smoke guest image")?;

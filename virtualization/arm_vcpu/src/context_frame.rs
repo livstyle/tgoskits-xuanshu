@@ -232,21 +232,23 @@ impl GuestSystemRegisters {
 
     /// Stores the current values of all relevant registers into the `GuestSystemRegisters` structure.
     ///
-    /// This method uses inline assembly to read the values of various system registers
-    /// and stores them in the corresponding fields of the `GuestSystemRegisters` structure.
-    pub unsafe fn store(&mut self) {
+    /// When `save_timers` is `false`, generic timer registers are left untouched so a
+    /// passthrough guest keeps direct CNTV/CNTP ownership across VM exits.
+    pub unsafe fn store(&mut self, save_timers: bool) {
         unsafe {
-            asm!("mrs {0}, CNTVOFF_EL2", out(reg) self.cntvoff_el2);
-            asm!("mrs {0}, CNTP_CVAL_EL0", out(reg) self.cntp_cval_el0);
-            asm!("mrs {0}, CNTV_CVAL_EL0", out(reg) self.cntv_cval_el0);
-            asm!("mrs {0:x}, CNTKCTL_EL1", out(reg) self.cntkctl_el1);
-            asm!("mrs {0:x}, CNTP_CTL_EL0", out(reg) self.cntp_ctl_el0);
-            asm!("mrs {0:x}, CNTV_CTL_EL0", out(reg) self.cntv_ctl_el0);
-            // TVAL registers are intentionally NOT saved.
-            // They are derived values (TVAL = CVAL - CNTVCT) and restoring them
-            // would overwrite CVAL with an incorrect deadline. See restore().
-            asm!("mrs {0}, CNTVCT_EL0", out(reg) self.cntvct_el0);
-            asm!("mrs {0}, CNTHCTL_EL2", out(reg) self.cnthctl_el2);
+            if save_timers {
+                asm!("mrs {0}, CNTVOFF_EL2", out(reg) self.cntvoff_el2);
+                asm!("mrs {0}, CNTP_CVAL_EL0", out(reg) self.cntp_cval_el0);
+                asm!("mrs {0}, CNTV_CVAL_EL0", out(reg) self.cntv_cval_el0);
+                asm!("mrs {0:x}, CNTKCTL_EL1", out(reg) self.cntkctl_el1);
+                asm!("mrs {0:x}, CNTP_CTL_EL0", out(reg) self.cntp_ctl_el0);
+                asm!("mrs {0:x}, CNTV_CTL_EL0", out(reg) self.cntv_ctl_el0);
+                // TVAL registers are intentionally NOT saved.
+                // They are derived values (TVAL = CVAL - CNTVCT) and restoring them
+                // would overwrite CVAL with an incorrect deadline. See restore().
+                asm!("mrs {0}, CNTVCT_EL0", out(reg) self.cntvct_el0);
+                asm!("mrs {0}, CNTHCTL_EL2", out(reg) self.cnthctl_el2);
+            }
             // MRS!("self.vpidr_el2, VPIDR_EL2, "x");
             asm!("mrs {0}, VMPIDR_EL2", out(reg) self.vmpidr_el2);
 
@@ -280,35 +282,33 @@ impl GuestSystemRegisters {
 
     /// Restores the values of all relevant system registers from the `GuestSystemRegisters` structure.
     ///
-    /// This method uses inline assembly to write the values stored in the `GuestSystemRegisters` structure
-    /// back to the system registers. This is essential for restoring the state of a virtual machine
-    /// or thread during context switching.
-    ///
-    /// Each system register is restored with its corresponding value from the `GuestSystemRegisters`, ensuring
-    /// that the virtual machine or thread resumes execution with the correct context.
-    pub unsafe fn restore(&self) {
+    /// When `restore_timers` is `false`, generic timer registers are not touched so a
+    /// passthrough guest keeps direct CNTV/CNTP ownership across VM exits.
+    pub unsafe fn restore(&self, restore_timers: bool) {
         unsafe {
-            let timer = self.timer_registers();
-            asm!("msr CNTVOFF_EL2, {0}", in(reg) timer.cntvoff_el2);
-            asm!("msr CNTKCTL_EL1, {0:x}", in (reg) timer.cntkctl_el1);
-            asm!("msr CNTHCTL_EL2, {0}", in(reg) timer.cnthctl_el2);
+            if restore_timers {
+                let timer = self.timer_registers();
+                asm!("msr CNTVOFF_EL2, {0}", in(reg) timer.cntvoff_el2);
+                asm!("msr CNTKCTL_EL1, {0:x}", in (reg) timer.cntkctl_el1);
+                asm!("msr CNTHCTL_EL2, {0}", in(reg) timer.cnthctl_el2);
 
-            // Restore CTL first (with ENABLE cleared to avoid spurious interrupts),
-            // then CVAL (absolute deadline), then CTL again with the real value.
-            //
-            // IMPORTANT: Do NOT restore TVAL registers here!
-            // Writing CNTP_TVAL_EL0 / CNTV_TVAL_EL0 implicitly overwrites the
-            // corresponding CVAL register (CVAL = CNTVCT + TVAL). Because the
-            // counter (CNTVCT/CNTPCT) has advanced since the values were saved,
-            // restoring TVAL would push the timer deadline into the future on every
-            // VM exit, causing guest timers (e.g. nanosleep / timerfd) to never fire.
-            // Restoring only CVAL preserves the original absolute deadline.
-            asm!("msr CNTP_CTL_EL0, xzr");
-            asm!("msr CNTV_CTL_EL0, xzr");
-            asm!("msr CNTP_CVAL_EL0, {0}", in(reg) timer.cntp_cval_el0);
-            asm!("msr CNTV_CVAL_EL0, {0}", in(reg) timer.cntv_cval_el0);
-            asm!("msr CNTP_CTL_EL0, {0:x}", in(reg) timer.cntp_ctl_el0);
-            asm!("msr CNTV_CTL_EL0, {0:x}", in(reg) timer.cntv_ctl_el0);
+                // Restore CTL first (with ENABLE cleared to avoid spurious interrupts),
+                // then CVAL (absolute deadline), then CTL again with the real value.
+                //
+                // IMPORTANT: Do NOT restore TVAL registers here!
+                // Writing CNTP_TVAL_EL0 / CNTV_TVAL_EL0 implicitly overwrites the
+                // corresponding CVAL register (CVAL = CNTVCT + TVAL). Because the
+                // counter (CNTVCT/CNTPCT) has advanced since the values were saved,
+                // restoring TVAL would push the timer deadline into the future on every
+                // VM exit, causing guest timers (e.g. nanosleep / timerfd) to never fire.
+                // Restoring only CVAL preserves the original absolute deadline.
+                asm!("msr CNTP_CTL_EL0, xzr");
+                asm!("msr CNTV_CTL_EL0, xzr");
+                asm!("msr CNTP_CVAL_EL0, {0}", in(reg) timer.cntp_cval_el0);
+                asm!("msr CNTV_CVAL_EL0, {0}", in(reg) timer.cntv_cval_el0);
+                asm!("msr CNTP_CTL_EL0, {0:x}", in(reg) timer.cntp_ctl_el0);
+                asm!("msr CNTV_CTL_EL0, {0:x}", in(reg) timer.cntv_ctl_el0);
+            }
             // Guest SP_EL0 is part of TrapFrame and is restored by `exception_return_el2`.
             asm!("msr SP_EL1, {0}", in(reg) self.sp_el1);
             asm!("msr ELR_EL1, {0}", in(reg) self.elr_el1);
