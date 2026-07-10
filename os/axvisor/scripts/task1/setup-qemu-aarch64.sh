@@ -12,8 +12,9 @@ info "=== Task 1 QEMU aarch64 setup ==="
 
 mkdir -p tmp/{configs,images}
 
-info "Pulling guest images (linux + arceos)..."
+info "Pulling guest images (linux + arceos + zephyr)..."
 cargo xtask image pull qemu-aarch64 --output-dir tmp/images
+cargo xtask image pull qemu-aarch64 --output-dir images
 
 if [[ -x scripts/task1/build-arceos-rt-guest.sh ]]; then
   info "Building custom rt-latency guest image (optional)..."
@@ -71,3 +72,7 @@ info "Run mixed Linux + RT partition:"
 info "  ./scripts/task1/run-mixed.sh"
 info "Collect bare-metal RTOS jitter baseline:"
 info "  ${TGOSKITS_ROOT}/scripts/task1/run-rt-baseline.sh"
+info "Zephyr RT guest baseline (pCPU3):"
+info "  ${TGOSKITS_ROOT}/scripts/task1/run-zephyr-rt-baseline.sh"
+info "RT-Thread RT guest baseline (pCPU3):"
+info "  ${TGOSKITS_ROOT}/scripts/task1/run-rtthread-rt-baseline.sh"

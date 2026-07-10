@@ -9,11 +9,12 @@ name = "zephyr-rt-baseline"
 vm_type = 1
 cpu_num = 1
 phys_cpu_ids = [3]
+vcpu_priorities = [-20]
 
 [kernel]
 entry_point = 0x4000_10b4
 image_location = "memory"
-kernel_path = "/path/to/zephyr-rt-baseline.bin"
+kernel_path = "../../../../images/qemu-aarch64/zephyr/zephyr-qemu"
 kernel_load_addr = 0x4000_0000
 dtb_load_addr = 0x47e0_0000
 

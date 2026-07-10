@@ -10,8 +10,8 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **阶段一** | 基线复现、测量框架、linux-smp2、裸机 RTOS 基线 | ✅ 已启动 |
-| **阶段二** | vCPU 优先级/抢占、pCPU 独占强化、vGIC/定时器优化 | 🚧 调度已完成；timer 直访待续 |
-| **阶段三** | 30min 长稳、stress 矩阵、改造前后对比报告 | ✅ 脚本与 guest 自动化已就绪 |
+| **阶段二** | vCPU 优先级/抢占、pCPU 独占强化、vGIC/定时器优化 | 🚧 调度已完成；timer 直访已实现 |
+| **阶段三** | 30min 长稳、stress 矩阵、改造前后对比报告 | 🚧 idle 矩阵已采集；stress pre-opt 待补 |
 
 ---
 
@@ -35,7 +35,8 @@
 |---|---|
 | `configs/vms/qemu/aarch64/linux-smp2.toml` | Linux 2 vCPU，`phys_cpu_ids = [1, 2]` |
 | `configs/vms/qemu/aarch64/arceos-rt-smp1.toml` | RT 域 ArceOS 1 vCPU，`phys_cpu_ids = [3]` |
-| `configs/vms/qemu/aarch64/zephyr-rt-baseline.toml` | Zephyr 裸机/客户机基线模板 |
+| `configs/vms/qemu/aarch64/zephyr-rt-baseline.toml` | Zephyr 裸机/客户机基线（image pull） |
+| `configs/vms/qemu/aarch64/rtthread-rt-baseline.toml` | RT-Thread 裸机/客户机基线（本地构建） |
 
 ### 3.2 一键脚本（在 `os/axvisor/` 下执行）
 
@@ -91,8 +92,9 @@ cd os/axvisor && ./scripts/task1/build-arceos-rt-guest.sh
 
 ```bash
 # 仓库根目录
-./scripts/task1/run-rt-guest-baseline.sh          # AxVisor guest 短测
-./scripts/task1/collect-rt-latency-report.sh      # 裸机 vs guest 报告
+./scripts/task1/run-rt-guest-baseline.sh          # AxVisor guest idle 短测 (RT_LATENCY_PASS)
+./scripts/task1/collect-rt-latency-report.sh      # 裸机 vs guest idle 简版
+./scripts/task1/collect-task1-matrix-report.sh    # bare + guest pre/post idle 矩阵
 ./scripts/task1/run-stress-matrix.sh              # 30min stress 操作说明
 ```
 
@@ -148,8 +150,8 @@ stress-ng --cpu 2 --vm 1 --fork 4 --timeout 1800s
 | RTOS | QEMU aarch64 | 状态 |
 |---|---|---|
 | ArceOS `rt-latency` | `cargo xtask test arceos -c rt-latency` | ✅ 已实现 |
-| Zephyr | `zephyr-rt-baseline.toml` + 自编译 `zephyr.bin` | 📋 模板已提供 |
-| RT-Thread | 仅 `phytiumpi/rtthread-smp1.toml` | 🔜 需补 QEMU 配置与镜像 |
+| Zephyr | `zephyr-rt-baseline.toml` + `cargo xtask image pull qemu-aarch64` | ✅ smoke 已接入 |
+| RT-Thread | `rtthread-rt-baseline.toml` + `build-rtthread-rt-guest.sh` | ✅ smoke 已接入 |
 
 **平台差异说明**：QEMU `virt` 与实板（RK3588/RK3568）在 GIC 版本、定时器精度、CPU 频率上存在差异；正式报告需分平台列出数据并说明不可直接横向对比的条件。
 
@@ -162,7 +164,8 @@ stress-ng --cpu 2 --vm 1 --fork 4 --timeout 1800s
 | vCPU 静态优先级 | `axvmconfig`、`axvm/runtime/vcpus.rs`、`axtask` | ✅ `vcpu_priorities` + CFS nice |
 | 启用可抢占调度 | `os/axvisor/Cargo.toml`、`axvm/Cargo.toml` → `sched-cfs` | ✅ 已启用 |
 | vGIC 注入路径优化 | `virtualization/arm_vgic/` | ⚠️ 保持现有；已加 vCPU wake |
-| arch timer 直访 | `virtualization/arm_vcpu/` | 🔜 待实施 |
+| passthrough GIC guest ioremap | `test-suit/arceos/rust`（`rt-latency` + `paging`） | ✅ 自构建 guest 可完成 GIC 初始化 |
+| arch timer 直访 | `virtualization/arm_vcpu/` | ✅ passthrough_timer 跳过 timer ctxt switch + CNTKCTL |
 | Hypervisor 后台任务绑核 | `os/axvisor/src/task.rs` | ✅ pCPU0 管理域 |
 
 ---
