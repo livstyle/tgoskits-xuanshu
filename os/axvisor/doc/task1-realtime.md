@@ -1,0 +1,150 @@
+# Task 1：AxVisor 实时性改造与验证 — 实施指南
+
+> 对应赛题任务一（30 分）与 `plans/技术方案.md` 阶段一～二。  
+> 本文档描述**当前已落地**的配置、脚本、测试与后续改造路线。
+
+---
+
+## 1. 目标与阶段划分
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| **阶段一** | 基线复现、测量框架、linux-smp2、裸机 RTOS 基线 | ✅ 已启动 |
+| **阶段二** | vCPU 优先级/抢占、pCPU 独占强化、vGIC/定时器优化 | 🔜 待实施 |
+| **阶段三** | 30min 长稳、stress 矩阵、改造前后对比报告 | 🔜 待阶段二 |
+
+---
+
+## 2. pCPU 分区设计（QEMU aarch64, `-smp 4`）
+
+| pCPU | 角色 | 配置文件 |
+|---|---|---|
+| 0 | AxVisor 宿主（shell、维护任务） | `configs/board/qemu-aarch64.toml` |
+| 1–2 | Linux 客户机 2 vCPU（AI / stress 域） | `configs/vms/qemu/aarch64/linux-smp2.toml` |
+| 3 | RT 客户机 1 vCPU（实时控制域） | `configs/vms/qemu/aarch64/arceos-rt-smp1.toml` |
+
+**说明**：当前宿主调度为 ArceOS **FIFO 协作调度**（未启用 `sched-rr`），`phys_cpu_ids` 通过 cpumask 约束 vCPU 可运行 pCPU；阶段二将补充优先级抢占与独占 enforcement。
+
+---
+
+## 3. 新增配置与脚本
+
+### 3.1 VM 配置
+
+| 文件 | 用途 |
+|---|---|
+| `configs/vms/qemu/aarch64/linux-smp2.toml` | Linux 2 vCPU，`phys_cpu_ids = [1, 2]` |
+| `configs/vms/qemu/aarch64/arceos-rt-smp1.toml` | RT 域 ArceOS 1 vCPU，`phys_cpu_ids = [3]` |
+| `configs/vms/qemu/aarch64/zephyr-rt-baseline.toml` | Zephyr 裸机/客户机基线模板 |
+
+### 3.2 一键脚本（在 `os/axvisor/` 下执行）
+
+```bash
+# 准备镜像与生成 tmp 配置
+./scripts/task1/setup-qemu-aarch64.sh
+
+# 仅启动 Linux 2vCPU 客户机
+./scripts/task1/run-linux-smp2.sh
+
+# 启动 Linux + RT 混合分区（任务一目标拓扑）
+./scripts/task1/run-mixed.sh
+```
+
+### 3.3 裸机 RTOS 抖动基线（M3）
+
+```bash
+# 仓库根目录
+./scripts/task1/run-rt-baseline.sh
+# 等价于
+cargo xtask arceos test qemu --arch aarch64 -g rust -c rt-latency
+```
+
+输出示例（解析前缀 `RT_LATENCY`）：
+
+```
+RT_LATENCY mode=bare period_ms=1 samples=200 mean_jitter_ns=... p99_jitter_ns=... max_jitter_ns=...
+RT_LATENCY mode=bare period_ms=10 samples=200 ...
+RT_LATENCY_PASS
+```
+
+---
+
+## 4. 自动化测试
+
+| 测试 | 命令 | 验收 |
+|---|---|---|
+| 裸机 RT 抖动基线 | `cargo xtask arceos test qemu --arch aarch64 -g rust -c rt-latency` | 输出 `RT_LATENCY_PASS` |
+| Linux 2vCPU 冒烟 | `cargo xtask axvisor test qemu --arch aarch64 -c linux-smp2` | shell 输出 `linux-smp2 pass`（`nproc` = 2） |
+
+测试用例路径：
+
+- `test-suit/arceos/rust/src/task/rt_latency.rs`
+- `test-suit/axvisor/normal/linux-smp2/`
+
+---
+
+## 5. 实时性测量方法
+
+### 5.1 周期任务抖动（已实现）
+
+- **负载**：1ms / 10ms 周期 `sleep_until` 唤醒
+- **指标**：mean / P99 / max jitter（纳秒）
+- **时间源**：ArceOS monotonic clock（`Instant`）
+- **裸机基线**：`rt-latency` 测试 feature
+- **虚拟化基线**：阶段二在相同负载下于 AxVisor Guest 内复跑并对比
+
+### 5.2 中断响应延迟（计划）
+
+- 参考 `test-suit/arceos/rust/src/task/irq.rs`
+- 阶段二增加 GPIO/虚拟 timer 注入 → handler 首指令延迟统计
+
+### 5.3 长稳与 stress（计划）
+
+```bash
+# 压力源：Linux 客户机内
+stress-ng --cpu 2 --vm 1 --fork 4 --timeout 1800s
+
+# 采样：RT 客户机持续输出 RT_LATENCY 行，host 侧重定向到 CSV
+```
+
+---
+
+## 6. 裸机 / 原生 RTOS 基线
+
+| RTOS | QEMU aarch64 | 状态 |
+|---|---|---|
+| ArceOS `rt-latency` | `cargo xtask test arceos -c rt-latency` | ✅ 已实现 |
+| Zephyr | `zephyr-rt-baseline.toml` + 自编译 `zephyr.bin` | 📋 模板已提供 |
+| RT-Thread | 仅 `phytiumpi/rtthread-smp1.toml` | 🔜 需补 QEMU 配置与镜像 |
+
+**平台差异说明**：QEMU `virt` 与实板（RK3588/RK3568）在 GIC 版本、定时器精度、CPU 频率上存在差异；正式报告需分平台列出数据并说明不可直接横向对比的条件。
+
+---
+
+## 7. 阶段二改造清单（待 PR）
+
+| 改造项 | 涉及路径 | 保底方案 |
+|---|---|---|
+| vCPU 静态优先级 | `axvmconfig`、`axvm/runtime/vcpus.rs`、`axtask` | pCPU 独占（已配置） |
+| 启用可抢占调度 | `os/axvisor/Cargo.toml` → `sched-rr` 或优先级调度 | 仅 cpumask |
+| vGIC 注入路径优化 | `virtualization/arm_vgic/` | 保持现有软件注入 |
+| arch timer 直访 | `virtualization/arm_vcpu/` | 虚拟 tick |
+| Hypervisor 后台任务绑核 | `os/axvisor/src/task.rs` | 文档约束 |
+
+---
+
+## 8. 复现检查清单
+
+- [ ] `cargo xtask axvisor defconfig qemu-aarch64`
+- [ ] `./scripts/task1/setup-qemu-aarch64.sh`
+- [ ] `cargo xtask arceos test qemu --arch aarch64 -g rust -c rt-latency`
+- [ ] `cargo xtask axvisor test qemu --arch aarch64 -c linux-smp2`
+- [ ] `./scripts/task1/run-mixed.sh`（手动确认双客户机串口）
+
+---
+
+## 9. 相关文档
+
+- 赛题任务说明：`plans/技术方案.md` §3.1
+- 环境问题：`plans/开发环境问题记录.md`
+- AxVisor FDT 配置：`os/axvisor/doc/FDT_Configuration_Guide.md`
