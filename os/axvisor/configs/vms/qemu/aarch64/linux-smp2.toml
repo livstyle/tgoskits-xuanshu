@@ -11,6 +11,7 @@ name = "linux-qemu-smp2"
 vm_type = 1
 cpu_num = 2
 phys_cpu_ids = [1, 2]
+vcpu_priorities = [10, 10]
 
 [kernel]
 entry_point = 0x8020_0000

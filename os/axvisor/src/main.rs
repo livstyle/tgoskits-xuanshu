@@ -45,6 +45,7 @@ mod network_console;
 #[cfg(feature = "browser-console")]
 mod network_status;
 mod shell;
+mod task;
 
 #[cfg(any(feature = "backtrace", feature = "test-panic-no-backtrace"))]
 fn init_panic_hook() {
@@ -99,6 +100,8 @@ fn main() {
         .unwrap_or_else(|error| panic!("failed to configure host console: {error:#}"));
 
     guest_console::submit_host_bytes(banner::STARTUP);
+
+    task::init_host_task_affinity();
 
     info!("Starting virtualization...");
     let manager = manager::AxvmManager::new()
