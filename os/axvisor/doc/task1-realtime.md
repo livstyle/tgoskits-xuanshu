@@ -10,8 +10,8 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **阶段一** | 基线复现、测量框架、linux-smp2、裸机 RTOS 基线 | ✅ 已启动 |
-| **阶段二** | vCPU 优先级/抢占、pCPU 独占强化、vGIC/定时器优化 | 🚧 进行中 |
-| **阶段三** | 30min 长稳、stress 矩阵、改造前后对比报告 | 🔜 待阶段二 |
+| **阶段二** | vCPU 优先级/抢占、pCPU 独占强化、vGIC/定时器优化 | 🚧 调度已完成；timer 直访待续 |
+| **阶段三** | 30min 长稳、stress 矩阵、改造前后对比报告 | ✅ 脚本与 guest 自动化已就绪 |
 
 ---
 
@@ -85,6 +85,19 @@ VM 配置 `[base]` 新增 `vcpu_priorities`（Linux CFS nice，`-20` 最高）�
 cd os/axvisor && ./scripts/task1/build-arceos-rt-guest.sh
 ```
 
+客户机模式输出 `mode=guest`；长稳采样使用 `rt-latency-long`（约 30min @ 10ms 周期）。
+
+### 3.5 阶段三：对比与 stress 脚本
+
+```bash
+# 仓库根目录
+./scripts/task1/run-rt-guest-baseline.sh          # AxVisor guest 短测
+./scripts/task1/collect-rt-latency-report.sh      # 裸机 vs guest 报告
+./scripts/task1/run-stress-matrix.sh              # 30min stress 操作说明
+```
+
+报告输出目录：`plans/task1-reports/`。
+
 ---
 
 ## 4. 自动化测试
@@ -92,11 +105,14 @@ cd os/axvisor && ./scripts/task1/build-arceos-rt-guest.sh
 | 测试 | 命令 | 验收 |
 |---|---|---|
 | 裸机 RT 抖动基线 | `cargo xtask arceos test qemu --arch aarch64 -g rust -c rt-latency` | 输出 `RT_LATENCY_PASS` |
+| AxVisor RT 客户机冒烟 | `cargo xtask axvisor test qemu --arch aarch64 -c arceos-rt-latency` | `VM[2] boot success`（pulled `qemu-aarch64/arceos/arceos-qemu`） |
+| AxVisor RT 客户机抖动（手动） | 混合分区 + `build-arceos-rt-guest.sh` bare-metal 镜像就绪后 | 输出 `RT_LATENCY_PASS`（`mode=guest`） |
 | Linux 2vCPU 冒烟 | `cargo xtask axvisor test qemu --arch aarch64 -c linux-smp2` | shell 输出 `linux-smp2 pass`（`nproc` = 2） |
 
 测试用例路径：
 
 - `test-suit/arceos/rust/src/task/rt_latency.rs`
+- `test-suit/axvisor/normal/arceos-rt-latency/`
 - `test-suit/axvisor/normal/linux-smp2/`
 
 ---
