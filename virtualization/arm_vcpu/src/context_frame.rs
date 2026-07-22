@@ -248,6 +248,10 @@ impl GuestSystemRegisters {
                 // would overwrite CVAL with an incorrect deadline. See restore().
                 asm!("mrs {0}, CNTVCT_EL0", out(reg) self.cntvct_el0);
                 asm!("mrs {0}, CNTHCTL_EL2", out(reg) self.cnthctl_el2);
+                // Stop guest timers from firing into the host between runs when
+                // HCR_EL2.IMO traps physical IRQs (emulated-interrupt guests).
+                asm!("msr CNTP_CTL_EL0, xzr");
+                asm!("msr CNTV_CTL_EL0, xzr");
             }
             // MRS!("self.vpidr_el2, VPIDR_EL2, "x");
             asm!("mrs {0}, VMPIDR_EL2", out(reg) self.vmpidr_el2);

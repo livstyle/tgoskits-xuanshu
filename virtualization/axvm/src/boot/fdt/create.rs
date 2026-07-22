@@ -43,7 +43,7 @@ pub fn create_guest_fdt(
         .as_deref()
         .ok_or_else(|| ax_err_type!(InvalidInput, "phys_cpu_ids is missing"))?;
 
-    let guest_tree = FdtTree::clone_filtered(fdt, |node_id, path, node| {
+    let mut guest_tree = FdtTree::clone_filtered(fdt, |node_id, path, node| {
         should_keep_generated_node(
             fdt,
             node_id,
@@ -53,7 +53,15 @@ pub fn create_guest_fdt(
             phys_cpu_ids,
         )
     })?;
-    Ok(guest_tree.finish())
+    #[cfg(target_arch = "aarch64")]
+    guest_tree.patch_emulated_virtio_interrupts(&crate_config.devices.emu_devices)?;
+    let mut bytes = guest_tree.finish();
+    if let Some(cmdline) = crate_config.kernel.cmdline.as_deref() {
+        let mut tree = FdtTree::from_bytes(&bytes)?;
+        tree.patch_chosen(None, Some(cmdline))?;
+        bytes = tree.finish();
+    }
+    Ok(bytes)
 }
 
 fn should_keep_generated_node(
@@ -258,8 +266,10 @@ pub(crate) fn patch_guest_fdt_for_runtime(
         || initrd_start_size.is_some()
         || tree.inner().get_by_path_id("/chosen").is_some()
     {
-        tree.patch_chosen(initrd_start_size)?;
+        tree.patch_chosen(initrd_start_size, crate_config.kernel.cmdline.as_deref())?;
     }
+    #[cfg(target_arch = "aarch64")]
+    tree.patch_emulated_virtio_interrupts(&crate_config.devices.emu_devices)?;
     Ok(tree.finish())
 }
 
@@ -448,6 +458,18 @@ mod tests {
         assert_eq!(
             sanitize_bootargs(bootargs),
             "root=/dev/mmcblk0p2 rw rootwait rootfstype=ext4 fsckfix"
+        );
+    }
+
+    #[test]
+    fn sanitize_bootargs_keeps_pure_initramfs_cmdline() {
+        assert_eq!(
+            sanitize_bootargs("rdinit=/init console=ttyAMA0"),
+            "rdinit=/init console=ttyAMA0"
+        );
+        assert_eq!(
+            sanitize_bootargs("root=/dev/ram0 rdinit=/init"),
+            "root=/dev/ram0 rdinit=/init fsck.repair=yes"
         );
     }
 

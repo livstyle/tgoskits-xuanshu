@@ -112,11 +112,37 @@ pub fn find_all_passthrough_devices(vm_cfg: &mut AxVMConfig, fdt: &Fdt) -> Vec<S
 
     all_device_names.retain(|device_name| device_name != "/");
 
+    // Host QEMU attaches virtio-blk to a virtio-mmio slot. Initramfs guests
+    // (ramdisk configured) must not passthrough those host slots or Linux hangs
+    // waiting on the block device IRQ. Keep only emu-backed VirtioNet nodes.
+    // Guests that boot from the host disk keep all virtio-mmio nodes.
+    if vm_cfg.image_config().ramdisk.is_some() {
+        let emu_virtio_mmio: BTreeSet<String> = vm_cfg
+            .emu_devices()
+            .iter()
+            .filter(|dev| dev.emu_type == axvm_types::EmulatedDeviceType::VirtioNet)
+            .map(|dev| alloc::format!("/virtio_mmio@{:x}", dev.base_gpa))
+            .collect();
+        if !emu_virtio_mmio.is_empty() {
+            all_device_names.retain(|device_name| {
+                if !device_name.starts_with("/virtio_mmio@") {
+                    return true;
+                }
+                let keep = emu_virtio_mmio.contains(device_name);
+                if !keep {
+                    info!("Excluding host virtio-mmio (initramfs guest): {device_name}");
+                }
+                keep
+            });
+        }
+    }
+
     debug!(
         "Passthrough devices analysis completed. Total devices: {} (added: {})",
         all_device_names.len(),
         all_device_names.len().saturating_sub(initial_device_count)
     );
+
     all_device_names
 }
 

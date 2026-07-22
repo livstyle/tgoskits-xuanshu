@@ -74,7 +74,8 @@ fn tree_rebuilds_memory_nodes_from_guest_regions() {
 fn tree_patches_chosen_bootargs_and_initrd() {
     let mut tree = FdtTree::from_bytes(&sample_dtb()).unwrap();
 
-    tree.patch_chosen(Some((0xa000_0000, 0x1234))).unwrap();
+    tree.patch_chosen(Some((0xa000_0000, 0x1234)), None)
+        .unwrap();
     let bytes = tree.finish();
     let reparsed = Fdt::from_bytes(&bytes).unwrap();
     let chosen = reparsed.get_by_path("/chosen").unwrap();
@@ -104,7 +105,7 @@ fn tree_patches_chosen_bootargs_and_initrd() {
 fn tree_removes_stale_initrd_when_no_ramdisk_is_present() {
     let mut tree = FdtTree::from_bytes(&sample_dtb()).unwrap();
 
-    tree.patch_chosen(None).unwrap();
+    tree.patch_chosen(None, None).unwrap();
     let bytes = tree.finish();
     let reparsed = Fdt::from_bytes(&bytes).unwrap();
     let chosen = reparsed.get_by_path("/chosen").unwrap();

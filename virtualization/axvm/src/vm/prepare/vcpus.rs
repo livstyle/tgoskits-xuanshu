@@ -66,6 +66,11 @@ impl PreparedVcpus {
                     .emu_devices()
                     .iter()
                     .any(|dev| dev.emu_type == EmulatedDeviceType::Console),
+                emulates_virtio_net: resources
+                    .config
+                    .emu_devices()
+                    .iter()
+                    .any(|dev| dev.emu_type == EmulatedDeviceType::VirtioNet),
                 passthrough_ports: resources.config.pass_through_ports(),
                 firmware_boot: guest_uses_firmware_boot(resources),
             })?;

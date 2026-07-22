@@ -31,12 +31,30 @@ pub trait IrqResolver: Send + Sync {
 /// VM-owned services available while a device factory is building a device.
 pub struct DeviceBuildContext<'a> {
     irq_resolver: &'a dyn IrqResolver,
+    /// Owning VM id (0 when unknown / host unit tests).
+    vm_id: usize,
 }
 
 impl<'a> DeviceBuildContext<'a> {
     /// Creates a device build context backed by `irq_resolver`.
     pub const fn new(irq_resolver: &'a dyn IrqResolver) -> Self {
-        Self { irq_resolver }
+        Self {
+            irq_resolver,
+            vm_id: 0,
+        }
+    }
+
+    /// Creates a context that also carries the owning VM id.
+    pub const fn with_vm_id(irq_resolver: &'a dyn IrqResolver, vm_id: usize) -> Self {
+        Self {
+            irq_resolver,
+            vm_id,
+        }
+    }
+
+    /// Returns the owning VM id (0 if unset).
+    pub const fn vm_id(&self) -> usize {
+        self.vm_id
     }
 
     /// Resolves a VM-local interrupt line.
@@ -130,5 +148,7 @@ impl DeviceFactory for MetaDeviceFactory {
 
 /// Registers device factories that do not depend on an architecture backend.
 pub fn register_builtin_factories(registry: &mut DeviceFactoryRegistry) -> AxResult {
-    registry.register(Arc::new(MetaDeviceFactory))
+    registry.register(Arc::new(MetaDeviceFactory))?;
+    registry.register(Arc::new(crate::VirtioNetFactory))?;
+    Ok(())
 }

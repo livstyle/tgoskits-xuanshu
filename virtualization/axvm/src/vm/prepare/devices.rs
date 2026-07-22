@@ -28,7 +28,7 @@ impl PreparedDevices {
         factories: &DeviceFactoryRegistry,
         interrupt_fabric: &InterruptFabric,
     ) -> AxResult<Self> {
-        let build_context = DeviceBuildContext::new(interrupt_fabric);
+        let build_context = DeviceBuildContext::with_vm_id(interrupt_fabric, vm.id());
         let mut devices = AxVmDevices::build_with_factories(
             AxVmDeviceConfig {
                 emu_configs: resources.config.emu_devices().to_vec(),

@@ -35,6 +35,7 @@ mod fw_cfg;
 mod loongarch_pch_pic;
 mod range_alloc;
 mod registration;
+mod virtio_net;
 #[cfg(target_arch = "x86_64")]
 mod x86;
 
@@ -58,6 +59,11 @@ pub use fw_cfg::{
 #[cfg(target_arch = "loongarch64")]
 pub use loongarch_pch_pic::{LoongArchPchPic, PchPicOutputEvent};
 pub use registration::{DeviceBundle, DeviceRegistration, PollableDeviceOps};
+pub use virtio_net::{
+    AclAction, FrameAcl, ICPC_UDP_PORT, IcpcPortAcl, LoopbackBackend, NetPortBackend, PortId,
+    SwitchPortBackend, VirtioNetDevice, VirtioNetFactory, VirtioNetPortEndpoint, VirtualSwitch,
+    endpoints_for_vm, global_vsw, lookup_port, peer_endpoints, register_port, unregister_port,
+};
 #[cfg(target_arch = "x86_64")]
 pub use x86::{
     X86IoApicDevice, X86IoApicDeviceOps, X86PitDevice, X86PitDeviceOps, X86SerialDeviceOps,

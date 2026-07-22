@@ -152,6 +152,9 @@ pub(crate) fn inject_pending_interrupts<A: ArchOps>(
         warn!("VM[{vm_id}] not found, cannot drain VCpu[{vcpu_id}] interrupts");
         return;
     };
+    // Cross-VM VirtioNet RX must be completed on this VM's pCPU before the
+    // corresponding IRQ is injected into the guest.
+    vm.poll_virtio_net_rx();
     let Ok(interrupts) = vm.with_runtime(|runtime| Ok(runtime.drain_pending_interrupts(vcpu_id)))
     else {
         warn!("VM[{vm_id}] vCPU runtime not found, cannot drain VCpu[{vcpu_id}] interrupts");

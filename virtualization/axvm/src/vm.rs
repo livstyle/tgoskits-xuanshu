@@ -841,7 +841,163 @@ impl AxVM {
         }
 
         devices.handle_mmio_write(addr, width, data)?;
+        self.finish_virtio_net_notify(&devices, addr)?;
         Ok(())
+    }
+
+    /// Completes VirtioNet QUEUE_NOTIFY with guest DMA + IRQ injection.
+    ///
+    /// After local TX frames are forwarded on the L2 switch, peer VirtioNet
+    /// ports are kicked so their RX used rings are updated and IRQs raised.
+    fn finish_virtio_net_notify(
+        &self,
+        devices: &Arc<AxVmDevices>,
+        addr: GuestPhysAddr,
+    ) -> AxResult {
+        // Drain any cross-VM RX that was deferred onto this vCPU before
+        // handling the guest's own QUEUE_NOTIFY.
+        self.poll_virtio_net_rx();
+
+        let Some(dev) = devices.find_mmio_dev(addr) else {
+            return Ok(());
+        };
+        let Some(net) = dev.as_any().downcast_ref::<axdevice::VirtioNetDevice>() else {
+            return Ok(());
+        };
+        if !net.take_pending_notify() {
+            return Ok(());
+        }
+        let raised = net.process_queues(
+            |gpa, buffer| self.read_from_guest(gpa, buffer),
+            |gpa, buffer| self.write_to_guest(gpa, buffer),
+        )?;
+        if raised {
+            let irq = net.irq_id();
+            if irq != 0 {
+                let _ = crate::runtime::vcpus::queue_interrupt(self.id(), 0, irq);
+            }
+        }
+        self.kick_peer_virtio_nets(net.port_id());
+        Ok(())
+    }
+
+    fn kick_peer_virtio_nets(&self, local_port: Option<axdevice::PortId>) {
+        for peer in axdevice::peer_endpoints(local_port) {
+            // Same-VM (or unset vm_id) peers can reuse this VM's GPA translators.
+            if peer.vm_id == 0 || peer.vm_id == self.id() {
+                let raised = peer.device.process_queues(
+                    |gpa, buffer| self.read_from_guest(gpa, buffer),
+                    |gpa, buffer| self.write_to_guest(gpa, buffer),
+                );
+                match raised {
+                    Ok(true) => {
+                        if peer.irq_id != 0 {
+                            let _ =
+                                crate::runtime::vcpus::queue_interrupt(self.id(), 0, peer.irq_id);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!("virtio-net kick: local peer port={:?} err={e:?}", peer.port);
+                    }
+                }
+                continue;
+            }
+
+            // Cross-VM: complete RX DMA on the sender path. Passthrough guests
+            // can block in recv/select for long stretches without a VM-exit, so
+            // deferring DMA to the peer pCPU leaves frames stuck in the vsw
+            // queue. write_to_guest CleanAndInvalidates to PoC for coherence.
+            let Some(peer_vm) = crate::get_vm_by_id(peer.vm_id) else {
+                warn!(
+                    "virtio-net kick: peer VM[{}] not found for port={:?}",
+                    peer.vm_id, peer.port
+                );
+                continue;
+            };
+            let raised = peer.device.process_queues(
+                |gpa, buffer| peer_vm.read_from_guest(gpa, buffer),
+                |gpa, buffer| peer_vm.write_to_guest(gpa, buffer),
+            );
+            #[cfg(target_arch = "aarch64")]
+            let peer_cpu = peer_vm
+                .get_vcpu_affinities_pcpu_ids()
+                .first()
+                .map(|(_, _, cpu)| *cpu);
+            match raised {
+                Ok(true) => {
+                    if peer.irq_id != 0 {
+                        // Pulse physical SPI immediately — the peer may stay in
+                        // guest mode (recv/select) without a VM-exit to drain the
+                        // software IRQ queue. Route to the peer's host CPU.
+                        #[cfg(target_arch = "aarch64")]
+                        crate::host::gic::set_pending_spi_on_cpu(peer.irq_id, peer_cpu);
+                        let _ = crate::runtime::vcpus::queue_interrupt(peer.vm_id, 0, peer.irq_id);
+                    }
+                }
+                Ok(false) => {
+                    // Peer has no RX buffer yet; retry when that guest next exits.
+                    peer.device.request_rx_kick();
+                    if peer.irq_id != 0 {
+                        #[cfg(target_arch = "aarch64")]
+                        crate::host::gic::set_pending_spi_on_cpu(peer.irq_id, peer_cpu);
+                        let _ = crate::runtime::vcpus::queue_interrupt(peer.vm_id, 0, peer.irq_id);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "virtio-net kick: cross-vm peer port={:?} vm={} err={e:?}",
+                        peer.port, peer.vm_id
+                    );
+                    peer.device.request_rx_kick();
+                }
+            }
+        }
+    }
+
+    /// Drains deferred VirtioNet RX work for this VM (must run on a local vCPU).
+    pub fn poll_virtio_net_rx(&self) {
+        for ep in axdevice::endpoints_for_vm(self.id()) {
+            if !ep.device.take_rx_kick() {
+                continue;
+            }
+            let mut read = |gpa, buffer: &mut [u8]| self.read_from_guest(gpa, buffer);
+            let mut write = |gpa, buffer: &[u8]| self.write_to_guest(gpa, buffer);
+            let result = ep.device.process_queues_split(&mut read, &mut write);
+            match result {
+                Ok((tx, rx)) => {
+                    if tx || rx {
+                        debug!(
+                            "virtio-net poll: vm={} port={:?} tx={tx} rx={rx} irq={}",
+                            self.id(),
+                            ep.port,
+                            ep.irq_id
+                        );
+                    }
+                    if (tx || rx) && ep.irq_id != 0 {
+                        let inject_err = crate::inject_current_vcpu_interrupt(ep.irq_id);
+                        if let Err(e) = inject_err {
+                            let _ = crate::runtime::vcpus::queue_interrupt(self.id(), 0, ep.irq_id);
+                            debug!(
+                                "virtio-net poll: direct IRQ {} failed ({e:?}), queued",
+                                ep.irq_id
+                            );
+                        }
+                    }
+                    if !rx {
+                        ep.device.request_rx_kick();
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "virtio-net poll: vm={} port={:?} err={e:?}",
+                        self.id(),
+                        ep.port
+                    );
+                    ep.device.request_rx_kick();
+                }
+            }
+        }
     }
 
     #[cfg(not(target_arch = "aarch64"))]

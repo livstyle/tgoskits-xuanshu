@@ -621,7 +621,7 @@ fn test_factory_registry_registers_and_finds_factory() {
 
     assert_eq!(factories.register(Arc::new(MockMmioFactory)), Ok(()));
     assert!(factories.get(EmulatedDeviceType::VirtioBlk).is_some());
-    assert!(factories.get(EmulatedDeviceType::VirtioNet).is_none());
+    assert!(factories.get(EmulatedDeviceType::VirtioNet).is_some());
 }
 
 #[test]

@@ -16,8 +16,8 @@ use ax_crate_interface::impl_interface;
 use ax_errno::{AxError, AxResult, ax_err};
 use ax_memory_addr::{PhysAddr, VirtAddr};
 use axvm_types::{
-    AccessWidth, GuestPhysAddr, NestedPagingConfig, SysRegAddr, VCpuId, VMId, VmArchPerCpuOps,
-    VmArchVcpuOps,
+    AccessWidth, GuestPhysAddr, NestedPagingConfig, SysRegAddr, VCpuId, VMId, VMInterruptMode,
+    VmArchPerCpuOps, VmArchVcpuOps,
 };
 
 use super::{
@@ -28,6 +28,24 @@ use super::{
 use crate::host::{HostCpu, HostMemory, HostTime, default_host, gic};
 
 mod npt;
+
+fn inject_guest_interrupt(
+    vm: &crate::AxVMRef,
+    vcpu: &crate::vm::AxVCpuRef<AxvmArmVcpu>,
+    vector: usize,
+) {
+    if vm.interrupt_mode() == VMInterruptMode::Passthrough {
+        gic::set_pending_spi(vector);
+        return;
+    }
+    if let Err(err) = vcpu.inject_interrupt(vector) {
+        warn!(
+            "Failed to inject queued interrupt {vector:#x} into VM[{}] VCpu[{}]: {err:?}",
+            vcpu.vm_id(),
+            vcpu.id()
+        );
+    }
+}
 
 pub(crate) struct Aarch64Arch;
 
@@ -103,8 +121,10 @@ impl ArchOps for Aarch64Arch {
     }
 
     fn clean_dcache_range(addr: VirtAddr, size: usize) {
+        // CleanAndInvalidate so MAP_IDENTICAL guests do not keep stale virtio
+        // RX / used-ring lines after hypervisor DMA into the same PA.
         aarch64_cpu_ext::cache::dcache_range(
-            aarch64_cpu_ext::cache::CacheOp::Clean,
+            aarch64_cpu_ext::cache::CacheOp::CleanAndInvalidate,
             addr.as_usize(),
             size,
         );
@@ -134,6 +154,47 @@ impl ArchOps for Aarch64Arch {
             passthrough_interrupt: passthrough,
             passthrough_timer: passthrough,
         })
+    }
+
+    fn before_vcpu_run(vm: &crate::AxVMRef, _vcpu: &crate::vm::AxVCpuRef<Self::VCpu>) {
+        if vm.interrupt_mode() != VMInterruptMode::Passthrough {
+            return;
+        }
+        // Physical GIC pending may be consumed by the host between injections;
+        // re-pulse while the virtio ISR bit remains set.
+        for ep in axdevice::endpoints_for_vm(vm.id()) {
+            if ep.device.interrupt_pending() {
+                gic::set_pending_spi(ep.irq_id);
+            }
+        }
+    }
+
+    fn inject_pending_interrupt(
+        vm: &crate::AxVMRef,
+        vcpu: &crate::vm::AxVCpuRef<Self::VCpu>,
+        interrupt: crate::vm::PendingInterrupt,
+    ) {
+        match interrupt {
+            crate::vm::PendingInterrupt::Normal(vector) => {
+                trace!(
+                    "Injecting queued interrupt {vector:#x} into VM[{}] VCpu[{}]",
+                    vcpu.vm_id(),
+                    vcpu.id()
+                );
+                inject_guest_interrupt(vm, vcpu, vector);
+            }
+            crate::vm::PendingInterrupt::External {
+                vector,
+                physical_irq,
+            } => {
+                warn!(
+                    "VM[{}] VCpu[{}] dropped unsupported external interrupt vector={vector:#x}, \
+                     physical_irq={physical_irq:#x}",
+                    vcpu.vm_id(),
+                    vcpu.id()
+                );
+            }
+        }
     }
 
     fn ipi_targets(
@@ -346,6 +407,13 @@ impl VmArchVcpuOps for AxvmArmVcpu {
     }
 
     fn inject_interrupt(&mut self, vector: usize) -> AxResult {
+        let passthrough = crate::current_vm_id()
+            .and_then(crate::get_vm_by_id)
+            .is_some_and(|vm| vm.interrupt_mode() == VMInterruptMode::Passthrough);
+        if passthrough {
+            gic::set_pending_spi(vector);
+            return Ok(());
+        }
         arm_result(self.0.inject_interrupt(vector))
     }
 
