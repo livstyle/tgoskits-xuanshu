@@ -127,7 +127,6 @@ impl FdtTree {
 
     pub(crate) fn patch_chosen(
         &mut self,
-        initrd_start_size: Option<(u64, u64)>,
         explicit_cmdline: Option<&str>,
     ) -> AxVmResult {
         let chosen_id = self.ensure_path("/chosen")?;
@@ -152,6 +151,38 @@ impl FdtTree {
         if let Some((start, size)) = initrd_start_size {
             chosen.set_property(prop_u64("linux,initrd-start", start));
             chosen.set_property(prop_u64("linux,initrd-end", start.saturating_add(size)));
+        }
+        Ok(())
+    }
+
+    /// Rewrites `interrupts` on emulated virtio-mmio nodes to match `irq_id`.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn patch_emulated_virtio_interrupts(
+        &mut self,
+        emu_devices: &[axvmconfig::EmulatedDeviceConfig],
+    ) -> AxResult<()> {
+        use axvmconfig::EmulatedDeviceType;
+        use fdt_edit::Property;
+
+        for dev in emu_devices {
+            if dev.emu_type != EmulatedDeviceType::VirtioNet {
+                continue;
+            }
+            let path = format!("/virtio_mmio@{:x}", dev.base_gpa);
+            let Some(node_id) = self.fdt.get_by_path_id(&path) else {
+                trace!("virtio-mmio node {path} not in guest FDT, skip IRQ patch");
+                continue;
+            };
+            let irq = u32::try_from(dev.irq_id)
+                .map_err(|_| ax_err_type!(InvalidInput, "virtio-net irq_id out of range"))?;
+            let mut prop = Property::new("interrupts", Vec::new());
+            // GICv3 three-cell form: SPI type, INTID, level-high.
+            prop.set_u32_ls(&[0, irq, 4]);
+            self.set_property(node_id, prop)?;
+            info!(
+                "Patched {path} interrupts -> SPI {irq} (INTID {})",
+                irq + 32
+            );
         }
         Ok(())
     }
@@ -289,11 +320,20 @@ pub(crate) fn sanitize_bootargs(bootargs: &str) -> String {
             || token.starts_with("root=UUID=")
             || token.starts_with("root=PARTUUID=")
     });
+    // Drop stale initramfs tokens only when a real block root is also present.
+    // Pure initramfs guests (cmdline = "rdinit=/init") must keep those tokens.
+    let has_non_ram_block_root = tokens.iter().any(|token| {
+        (token.starts_with("root=/dev/") && *token != "root=/dev/ram0")
+            || token.starts_with("root=PARTLABEL=")
+            || token.starts_with("root=LABEL=")
+            || token.starts_with("root=UUID=")
+            || token.starts_with("root=PARTUUID=")
+    });
     let mut sanitized = Vec::with_capacity(tokens.len());
     let mut index = 0;
 
     while index < tokens.len() {
-        if matches!(tokens[index], "root=/dev/ram0" | "rdinit=/init") {
+        if has_non_ram_block_root && matches!(tokens[index], "root=/dev/ram0" | "rdinit=/init") {
             index += 1;
             continue;
         }

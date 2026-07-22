@@ -128,11 +128,11 @@ pub(crate) fn inject_pending_interrupts<A: Architecture>(
         warn!("VM[{vm_id}] not found, cannot drain VCpu[{vcpu_id}] interrupts");
         return;
     };
-    let Ok(runtime) = vm.runtime_handle() else {
+    let Ok(interrupts) = vm.with_runtime(|runtime| Ok(runtime.drain_pending_interrupts(vcpu_id)))
+    else {
         warn!("VM[{vm_id}] vCPU runtime not found, cannot drain VCpu[{vcpu_id}] interrupts");
         return;
     };
-    let interrupts = runtime.drain_pending_interrupts(vcpu_id);
 
     for interrupt in interrupts {
         A::inject_pending_interrupt(&vm, vcpu, interrupt);
