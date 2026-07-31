@@ -15,6 +15,47 @@
 #include <unistd.h>
 
 #define PEER_IP "10.0.9.3"
+#define ACL_SENTINEL_PORT 12345
+#define DEDUP_WINDOW 32
+
+static uint32_t dedup_slots[DEDUP_WINDOW];
+static unsigned dedup_head;
+
+static void say(const char *msg);
+static int send_frame(int fd, const struct sockaddr_in *peer, socklen_t peer_len,
+                      uint8_t msg_type, uint32_t seq, uint64_t ts_ns,
+                      uint16_t err_code, const uint8_t *payload, size_t plen);
+
+static int dedup_seen(uint32_t seq)
+{
+    for (unsigned i = 0; i < DEDUP_WINDOW; i++) {
+        if (dedup_slots[i] == seq)
+            return 1;
+    }
+    return 0;
+}
+
+static void dedup_remember(uint32_t seq)
+{
+    dedup_slots[dedup_head] = seq;
+    dedup_head = (dedup_head + 1) % DEDUP_WINDOW;
+}
+
+static void reply_ctrl(int fd, struct sockaddr_in *peer, socklen_t peer_len,
+                       const icpc_header_t *hdr)
+{
+    send_frame(fd, peer, peer_len, ICPC_TYPE_STATE_REPORT, hdr->seq, hdr->timestamp_ns,
+               0, (const uint8_t *)"state=ok", 8);
+    say("ICPC_PEER_STATE\n");
+}
+
+static void reply_error_ack(int fd, struct sockaddr_in *peer, socklen_t peer_len,
+                            const icpc_header_t *hdr)
+{
+    send_frame(fd, peer, peer_len, ICPC_TYPE_ACK, hdr->seq, hdr->timestamp_ns, 0, NULL,
+               0);
+    say("ICPC_PEER_ACK\n");
+}
 
 static void say(const char *msg)
 {
@@ -98,16 +139,22 @@ static void handle_datagram(int fd, const uint8_t *buf, ssize_t n,
 
     switch (hdr.msg_type) {
     case ICPC_TYPE_CTRL_CMD:
+        if (dedup_seen(hdr.seq)) {
+            reply_ctrl(fd, peer, peer_len, &hdr);
+            break;
+        }
+        dedup_remember(hdr.seq);
         say("ICPC_PEER_CTRL\n");
-        send_frame(fd, peer, peer_len, ICPC_TYPE_STATE_REPORT, hdr.seq,
-                   hdr.timestamp_ns, 0, (const uint8_t *)"state=ok", 8);
-        say("ICPC_PEER_STATE\n");
+        reply_ctrl(fd, peer, peer_len, &hdr);
         break;
     case ICPC_TYPE_ERROR_NOTIFY:
+        if (dedup_seen(hdr.seq)) {
+            reply_error_ack(fd, peer, peer_len, &hdr);
+            break;
+        }
+        dedup_remember(hdr.seq);
         say("ICPC_PEER_ERROR\n");
-        send_frame(fd, peer, peer_len, ICPC_TYPE_ACK, hdr.seq, hdr.timestamp_ns,
-                   0, NULL, 0);
-        say("ICPC_PEER_ACK\n");
+        reply_error_ack(fd, peer, peer_len, &hdr);
         break;
     case ICPC_TYPE_STATE_REPORT:
         say("ICPC_PEER_RX_STATE\n");
@@ -147,6 +194,32 @@ static void icpc_serve_forever(void)
     }
 }
 
+static void acl_sentinel_forever(void)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return;
+
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port = htons(ACL_SENTINEL_PORT);
+    if (bind(fd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+        close(fd);
+        return;
+    }
+
+    for (;;) {
+        uint8_t buf[64];
+        struct sockaddr_in peer;
+        socklen_t peer_len = sizeof(peer);
+        ssize_t n = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&peer, &peer_len);
+        if (n > 0)
+            say("ICPC_ACL_LEAK\n");
+    }
+}
+
 int main(void)
 {
     write(1, "ICPC_PEER_START\n", 16);
@@ -172,6 +245,11 @@ int main(void)
 
     if (fork() == 0) {
         icpc_serve_forever();
+        _exit(0);
+    }
+
+    if (fork() == 0) {
+        acl_sentinel_forever();
         _exit(0);
     }
 

@@ -21,5 +21,5 @@ pub use port_registry::{
 };
 pub use vsw::{
     AclAction, FrameAcl, ICPC_UDP_PORT, IcpcPortAcl, PortId, SwitchPortBackend, VirtualSwitch,
-    global_vsw,
+    configure_vsw_fault_inject, global_vsw,
 };
