@@ -44,7 +44,7 @@ Guest B (RTOS)   10.0.9.3 / MAC 02:00:00:00:00:03
 | 虚拟交换 vsw | `virtualization/axdevice/src/virtio_net/vsw.rs`（原规划 `os/axvisor/src/vsw/`） |
 | icpc 协议库 | `components/icpc/` |
 | 压测 / CLI | `apps/icpc-bench/`、`apps/icpc-cli/`（后续） |
-| 测试用例 | `test-suit/axvisor/normal/virtio-net-loopback/`、`vsw-dual-guest/`、`icpc-smoke/` |
+| 测试用例 | `virtio-net-loopback/`、`vsw-dual-guest/`、`icpc-smoke/`、`icpc-bench/`、`icpc-acl-deny/`、`stress/icpc-fault-inject/` |
 
 ---
 
@@ -80,7 +80,10 @@ cargo xtask axvisor test qemu --arch aarch64 -c virtio-net-loopback
 cargo test -p icpc
 ./scripts/task2/setup-icpc-guests.sh
 cargo xtask axvisor test qemu --arch aarch64 -c icpc-smoke
+cargo xtask axvisor test qemu --arch aarch64 -c icpc-bench
+cargo xtask axvisor test qemu --arch aarch64 -c icpc-acl-deny
 cargo xtask axvisor test qemu --arch aarch64 -c vsw-dual-guest
+cargo xtask axvisor test qemu --arch aarch64 -g stress -c icpc-fault-inject
 ```
 
 ---
@@ -92,6 +95,6 @@ cargo xtask axvisor test qemu --arch aarch64 -c vsw-dual-guest
 | IP 链路建立且配置清楚 | 4 | ✅ |
 | 应用层协议字段完整 | 5 | ✅ |
 | 三类业务消息可用 | 5 | ✅ |
-| 可靠性/超时/重连 | 4 | ⬜ |
+| 可靠性/超时/重连 | 4 | ✅ |
 | 自动化测试数据充分 | 4 | ✅ |
-| 网络隔离与访问控制 | 3 | 🚧 |
+| 网络隔离与访问控制 | 3 | ✅ |

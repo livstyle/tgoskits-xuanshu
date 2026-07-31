@@ -5,6 +5,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use ax_kspin::SpinNoIrq as Mutex;
 
@@ -15,6 +16,51 @@ pub const DEFAULT_QUEUE_DEPTH: usize = 64;
 
 /// icpc UDP destination port allow-listed by [`IcpcPortAcl`].
 pub const ICPC_UDP_PORT: u16 = 9527;
+
+static FAULT_DROP_EVERY: AtomicU32 = AtomicU32::new(0);
+
+/// Enables deterministic L2 drop for CI fault-injection tests.
+///
+/// When `drop_every_n > 0`, roughly `1/drop_every_n` of icpc UDP frames are dropped
+/// (ARP and non-icpc traffic pass). `0` disables injection.
+pub fn configure_vsw_fault_inject(drop_every_n: u32) {
+    FAULT_DROP_EVERY.store(drop_every_n, Ordering::Relaxed);
+    if drop_every_n > 0 {
+        info!("vsw fault inject: drop every {drop_every_n} forwarded frame(s)");
+    }
+}
+
+fn icpc_frame_drop_hash(frame: &[u8]) -> u32 {
+    let mut hash = 0x811c_9dc5u32;
+    for &byte in frame {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+fn should_drop_forwarded_frame(frame: &[u8]) -> bool {
+    let every = FAULT_DROP_EVERY.load(Ordering::Relaxed);
+    if every == 0 {
+        return false;
+    }
+    if frame.len() >= 14 {
+        let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+        // Keep ARP so guest peers can resolve MACs under injected loss.
+        if ethertype == 0x0806 {
+            return false;
+        }
+    }
+    let (udp_src, udp_dst) = parse_udp_ports(frame);
+    let is_icpc = matches!(
+        (udp_src, udp_dst),
+        (_, Some(ICPC_UDP_PORT)) | (Some(ICPC_UDP_PORT), _)
+    );
+    if !is_icpc {
+        return false;
+    }
+    icpc_frame_drop_hash(frame) % every == 0
+}
 
 /// One switch port identifier (unique across the hypervisor).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -164,6 +210,10 @@ impl VirtualSwitch {
 
         let mut ports = self.ports.lock();
         for port in &targets {
+            if should_drop_forwarded_frame(frame) {
+                debug!("vsw fault inject: drop frame to port {}", port.0);
+                continue;
+            }
             if let Some(q) = ports.get_mut(port) {
                 q.push(frame.to_vec());
             }
@@ -308,5 +358,72 @@ mod tests {
         let mut out = [0u8; 128];
         let n = b.try_receive(&mut out).expect("frame delivered to peer");
         assert_eq!(&out[..n], &frame[..]);
+    }
+
+    #[test]
+    fn icpc_port_acl_drops_non_icpc_udp() {
+        let sw = Arc::new(VirtualSwitch::new(Arc::new(IcpcPortAcl), 8));
+        sw.add_port(PortId(1));
+        sw.add_port(PortId(2));
+
+        let mut udp = [0u8; 64];
+        udp[0..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 2]);
+        udp[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
+        udp[12] = 0x08;
+        udp[13] = 0x00;
+        udp[14] = 0x45;
+        udp[23] = 17;
+        udp[34] = 0x12;
+        udp[35] = 0x34;
+        udp[36] = 0x30;
+        udp[37] = 0x39; // dst port 12345
+
+        assert!(sw.forward(PortId(1), &udp).is_empty());
+        assert!(sw.try_receive(PortId(2)).is_none());
+    }
+
+    #[test]
+    fn fault_inject_drops_some_icpc_udp_frames() {
+        configure_vsw_fault_inject(2);
+        let sw = Arc::new(VirtualSwitch::new(Arc::new(IcpcPortAcl), 8));
+        sw.add_port(PortId(1));
+        sw.add_port(PortId(2));
+
+        let mut arp = [0u8; 64];
+        arp[0..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 2]);
+        arp[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
+        arp[12] = 0x08;
+        arp[13] = 0x06;
+        sw.forward(PortId(1), &arp);
+        sw.forward(PortId(1), &arp);
+        assert!(sw.try_receive(PortId(2)).is_some());
+        assert!(sw.try_receive(PortId(2)).is_some());
+
+        let mut udp = [0u8; 64];
+        udp[0..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 2]);
+        udp[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
+        udp[12] = 0x08;
+        udp[13] = 0x00;
+        udp[14] = 0x45;
+        udp[23] = 17; // UDP
+        udp[34] = 0x12;
+        udp[35] = 0x34;
+        udp[36] = (ICPC_UDP_PORT >> 8) as u8;
+        udp[37] = (ICPC_UDP_PORT & 0xff) as u8;
+
+        let mut delivered = 0usize;
+        let mut dropped = 0usize;
+        for seq in 0u8..32 {
+            udp[38] = seq;
+            sw.forward(PortId(1), &udp);
+            if sw.try_receive(PortId(2)).is_some() {
+                delivered += 1;
+            } else {
+                dropped += 1;
+            }
+        }
+        assert!(delivered > 0);
+        assert!(dropped > 0);
+        configure_vsw_fault_inject(0);
     }
 }

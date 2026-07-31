@@ -15,6 +15,8 @@
 #define ICPC_TYPE_ACK 0x04
 #define ICPC_TYPE_HEARTBEAT 0x05
 
+#define ICPC_FLAG_NEED_ACK 0x01
+
 #define ICPC_MAX_FRAME 1500
 
 typedef struct {
