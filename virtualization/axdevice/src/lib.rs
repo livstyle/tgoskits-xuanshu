@@ -62,7 +62,8 @@ pub use registration::{DeviceBundle, DeviceRegistration, PollableDeviceOps};
 pub use virtio_net::{
     AclAction, FrameAcl, ICPC_UDP_PORT, IcpcPortAcl, LoopbackBackend, NetPortBackend, PortId,
     SwitchPortBackend, VirtioNetDevice, VirtioNetFactory, VirtioNetPortEndpoint, VirtualSwitch,
-    endpoints_for_vm, global_vsw, lookup_port, peer_endpoints, register_port, unregister_port,
+    configure_vsw_fault_inject, endpoints_for_vm, global_vsw, lookup_port, peer_endpoints,
+    register_port, unregister_port,
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86::{

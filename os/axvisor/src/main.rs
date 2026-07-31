@@ -50,6 +50,12 @@ fn main() {
 
     task::init_host_task_affinity();
 
+    #[cfg(feature = "vsw-fault-inject")]
+    {
+        // Deterministic ~50% icpc UDP forward drop for icpc-fault-inject CI.
+        axdevice::configure_vsw_fault_inject(2);
+    }
+
     info!("Starting virtualization...");
     let manager = manager::AxvmManager::new().expect("failed to initialize AxVM manager");
 
