@@ -10,7 +10,12 @@ use std::{
 
 #[cfg(feature = "rt-latency-long")]
 const DEFAULT_SAMPLES: usize = 180_000;
-#[cfg(not(feature = "rt-latency-long"))]
+#[cfg(all(not(feature = "rt-latency-long"), feature = "rt-latency-stress-short"))]
+const DEFAULT_SAMPLES: usize = 18_000;
+#[cfg(all(
+    not(feature = "rt-latency-long"),
+    not(feature = "rt-latency-stress-short")
+))]
 const DEFAULT_SAMPLES: usize = 200;
 
 const PERIODS_MS: &[u64] = &[1, 10];
