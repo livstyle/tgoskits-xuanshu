@@ -14,12 +14,17 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "icpc-pid-plant.h"
+
 #define PEER_IP "10.0.9.3"
 #define ACL_SENTINEL_PORT 12345
 #define DEDUP_WINDOW 32
 
+#define PID_STEPS_PER_CTRL 100
+
 static uint32_t dedup_slots[DEDUP_WINDOW];
 static unsigned dedup_head;
+static pid_plant_t g_plant;
 
 static void say(const char *msg);
 static int send_frame(int fd, const struct sockaddr_in *peer, socklen_t peer_len,
@@ -42,10 +47,51 @@ static void dedup_remember(uint32_t seq)
 }
 
 static void reply_ctrl(int fd, struct sockaddr_in *peer, socklen_t peer_len,
-                       const icpc_header_t *hdr)
+                       const icpc_header_t *hdr, const uint8_t *payload, size_t plen)
 {
+    char state_buf[96];
+    int is_pid = 0;
+
+    if (payload && plen > 0) {
+        if (strstr((const char *)payload, "reset=1") != NULL) {
+            pid_plant_init(&g_plant);
+            send_frame(fd, peer, peer_len, ICPC_TYPE_STATE_REPORT, hdr->seq,
+                       hdr->timestamp_ns, 0, (const uint8_t *)"state=reset", 11);
+            say("ICPC_PEER_RESET\n");
+            return;
+        }
+        double kp = g_plant.kp;
+        double ki = g_plant.ki;
+        double kd = g_plant.kd;
+        double sp = g_plant.setpoint;
+        if (pid_plant_parse_ctrl((const char *)payload, plen, &kp, &ki, &kd, &sp)) {
+            if (strstr((const char *)payload, "setpoint=") != NULL) {
+                pid_plant_set_gains(&g_plant, kp, ki, kd, sp);
+                for (int step = 0; step < PID_STEPS_PER_CTRL; step++)
+                    pid_plant_step(&g_plant);
+                is_pid = 1;
+                say("ICPC_PEER_PID_TUNED\n");
+            } else {
+                pid_plant_set_gains(&g_plant, kp, ki, kd, g_plant.setpoint);
+            }
+        }
+    }
+
+    const uint8_t *out_payload;
+    size_t out_len;
+    if (is_pid) {
+        int n = pid_plant_format_state(&g_plant, state_buf, sizeof(state_buf));
+        if (n <= 0)
+            return;
+        out_payload = (const uint8_t *)state_buf;
+        out_len = (size_t)n;
+    } else {
+        out_payload = (const uint8_t *)"state=ok";
+        out_len = 8;
+    }
+
     send_frame(fd, peer, peer_len, ICPC_TYPE_STATE_REPORT, hdr->seq, hdr->timestamp_ns,
-               0, (const uint8_t *)"state=ok", 8);
+               0, out_payload, out_len);
     say("ICPC_PEER_STATE\n");
 }
 
@@ -140,12 +186,13 @@ static void handle_datagram(int fd, const uint8_t *buf, ssize_t n,
     switch (hdr.msg_type) {
     case ICPC_TYPE_CTRL_CMD:
         if (dedup_seen(hdr.seq)) {
-            reply_ctrl(fd, peer, peer_len, &hdr);
+            reply_ctrl(fd, peer, peer_len, &hdr, payload,
+                       plen > 0 ? (size_t)plen : 0);
             break;
         }
         dedup_remember(hdr.seq);
         say("ICPC_PEER_CTRL\n");
-        reply_ctrl(fd, peer, peer_len, &hdr);
+        reply_ctrl(fd, peer, peer_len, &hdr, payload, plen > 0 ? (size_t)plen : 0);
         break;
     case ICPC_TYPE_ERROR_NOTIFY:
         if (dedup_seen(hdr.seq)) {
@@ -242,6 +289,8 @@ int main(void)
         say("ICPC_PEER_ETH_FAIL\n");
     else
         say("ICPC_PEER_READY\n");
+
+    pid_plant_init(&g_plant);
 
     if (fork() == 0) {
         icpc_serve_forever();

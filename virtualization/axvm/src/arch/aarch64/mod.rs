@@ -149,10 +149,10 @@ impl ArchOps for Aarch64Arch {
     fn build_vcpu_setup_config(
         ctx: VcpuSetupContext<'_>,
     ) -> AxResult<<Self::VCpu as VmArchVcpuOps>::SetupConfig> {
-        let passthrough = ctx.interrupt_mode == axvm_types::VMInterruptMode::Passthrough;
+        let passthrough_interrupt = ctx.interrupt_mode == axvm_types::VMInterruptMode::Passthrough;
         Ok(ArmVcpuSetupConfig {
-            passthrough_interrupt: passthrough,
-            passthrough_timer: passthrough,
+            passthrough_interrupt,
+            passthrough_timer: ctx.passthrough_timer,
         })
     }
 

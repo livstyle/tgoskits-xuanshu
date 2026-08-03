@@ -16,6 +16,7 @@ host-fs = ["ax-std/fs"]
 vmx = ["x86_vcpu/vmx"]
 svm = ["x86_vcpu/svm"]
 sstc = ["riscv_vcpu/sstc"]
+rt-vcpu-fast-wake = []
 
 [dependencies]
 log = "0.4"

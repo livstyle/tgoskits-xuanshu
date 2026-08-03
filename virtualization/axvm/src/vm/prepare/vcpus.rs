@@ -61,6 +61,7 @@ impl PreparedVcpus {
         for vcpu in &self.vcpus {
             let setup_config = CurrentArch::build_vcpu_setup_config(VcpuSetupContext {
                 interrupt_mode: resources.config.interrupt_mode(),
+                passthrough_timer: resources.config.passthrough_timer(),
                 emulates_console: resources
                     .config
                     .emu_devices()

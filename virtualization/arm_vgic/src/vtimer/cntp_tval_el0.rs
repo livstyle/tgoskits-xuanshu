@@ -54,9 +54,14 @@ impl BaseDeviceOps<SysRegAddrRange> for SysCntpTvalEl0 {
     ) -> AxResult {
         info!("Write to emulator register: {addr:?}, value: {val}");
         let now = host::current_time_nanos();
-        info!("Current time: {}, deadline: {}", now, now + val as u64);
+        #[cfg(feature = "task1-slow-vtimer")]
+        const BASELINE_TIMER_SLACK_NS: u64 = 1_000_000;
+        #[cfg(not(feature = "task1-slow-vtimer"))]
+        const BASELINE_TIMER_SLACK_NS: u64 = 0;
+        let deadline = now + val as u64 + BASELINE_TIMER_SLACK_NS;
+        info!("Current time: {}, deadline: {}", now, deadline);
         host::register_timer(
-            Duration::from_nanos(now + val as u64),
+            Duration::from_nanos(deadline),
             Box::new(|_| {
                 crate::api_reexp::hardware_inject_virtual_interrupt(30);
             }),

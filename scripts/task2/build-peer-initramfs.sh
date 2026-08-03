@@ -36,6 +36,7 @@ echo "[task2] Building icpc peer init with ${CC}"
   -I "${SRC}" \
   -o "${WORKDIR}/root/init" \
   "${SRC}/icpc-wire.c" \
+  "${SRC}/icpc-pid-plant.c" \
   "${SRC}/icpc-peer-server.c"
 chmod 0755 "${WORKDIR}/root/init"
 

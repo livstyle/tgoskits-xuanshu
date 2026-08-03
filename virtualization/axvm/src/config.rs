@@ -92,6 +92,7 @@ pub struct AxVMConfig {
     // Physical interrupt sources forwarded to the guest in passthrough mode.
     passthrough_irq_list: Vec<u32>,
     interrupt_mode: VMInterruptMode,
+    passthrough_timer: bool,
 }
 
 /// Parameters used to build an [`AxVMConfig`].
@@ -113,6 +114,7 @@ pub struct AxVMConfigParams {
     pub memory_regions: Vec<VmMemConfig>,
     pub boot_policy: GuestBootPolicy,
     pub interrupt_mode: VMInterruptMode,
+    pub passthrough_timer: bool,
 }
 
 impl AxVMConfig {
@@ -135,6 +137,7 @@ impl AxVMConfig {
             boot_policy: params.boot_policy,
             passthrough_irq_list: Vec::new(),
             interrupt_mode: params.interrupt_mode,
+            passthrough_timer: params.passthrough_timer,
         }
     }
 
@@ -295,6 +298,11 @@ impl AxVMConfig {
     /// Returns the interrupt mode of the VM.
     pub fn interrupt_mode(&self) -> VMInterruptMode {
         self.interrupt_mode
+    }
+
+    /// Returns whether the guest virtual timer uses host physical timer passthrough.
+    pub fn passthrough_timer(&self) -> bool {
+        self.passthrough_timer
     }
 
     /// Relocate the guest kernel image while preserving the configured

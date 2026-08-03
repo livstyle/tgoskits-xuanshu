@@ -189,6 +189,7 @@ pub(crate) struct VcpuCreateContext {
 #[allow(dead_code)]
 pub(crate) struct VcpuSetupContext<'a> {
     pub(crate) interrupt_mode: VMInterruptMode,
+    pub(crate) passthrough_timer: bool,
     pub(crate) emulates_console: bool,
     /// Emulated VirtioNet needs virtual IRQ injection (HCR_EL2.IMO) even when
     /// other devices use GIC passthrough.

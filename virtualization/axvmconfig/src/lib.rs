@@ -857,6 +857,10 @@ pub struct VMDevicesConfig {
     )]
     #[serde(with = "vm_interrupt_mode_serde")]
     pub interrupt_mode: VMInterruptMode,
+    /// When set, overrides timer passthrough independently of `interrupt_mode`.
+    /// Defaults to `true` for passthrough VMs and `false` otherwise.
+    #[serde(default)]
+    pub passthrough_timer: Option<bool>,
     /// we would not like to pass through devices
     #[serde(default)]
     pub excluded_devices: Vec<Vec<String>>,
@@ -876,6 +880,14 @@ pub struct VMDevicesConfig {
     )]
     #[serde(with = "passthrough_port_config_vec_serde")]
     pub passthrough_ports: Vec<PassThroughPortConfig>,
+}
+
+impl VMDevicesConfig {
+    /// Returns whether the guest virtual timer uses host physical timer passthrough.
+    pub fn passthrough_timer_enabled(&self) -> bool {
+        self.passthrough_timer
+            .unwrap_or(self.interrupt_mode == VMInterruptMode::Passthrough)
+    }
 }
 
 /// The configuration structure for the guest VM serialized from a toml file provided by user,

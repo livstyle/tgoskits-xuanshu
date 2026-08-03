@@ -243,6 +243,7 @@ pub(crate) fn build_axvm_config(cfg: &AxVMCrateConfig) -> AxVMConfig {
         memory_regions: cfg.kernel.memory_regions.clone(),
         boot_policy: GuestBootPolicy::KeepConfigured,
         interrupt_mode: cfg.devices.interrupt_mode,
+        passthrough_timer: cfg.devices.passthrough_timer_enabled(),
     })
 }
 

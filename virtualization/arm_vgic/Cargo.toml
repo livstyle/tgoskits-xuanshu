@@ -20,6 +20,8 @@ targets = ["aarch64-unknown-none-softfloat"]
 [features]
 default = []
 vgicv3 = []
+# Task 1 pre-opt: extra emulated timer slack (hypervisor timer wheel latency).
+task1-slow-vtimer = []
 
 [dependencies]
 ax-kspin.workspace = true

@@ -95,7 +95,8 @@ impl PreparedDevices {
             if !gicd_found {
                 warn!("Failed to assign SPIs: No VGicD found in device list");
             }
-        } else {
+        }
+        if !resources.config.passthrough_timer() {
             for dev in axdevice::create_vtimer_devices() {
                 devices
                     .register(Arc::from(dev) as Arc<dyn axdevice_base::Device>)

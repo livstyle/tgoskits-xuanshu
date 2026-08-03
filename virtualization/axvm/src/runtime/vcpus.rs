@@ -51,6 +51,27 @@ where
     vm_vcpus.wait_until(condition);
 }
 
+fn rt_vcpu_fast_wake_enabled(priority: Option<i32>) -> bool {
+    #[cfg(feature = "rt-vcpu-fast-wake")]
+    {
+        priority.is_some_and(|p| p <= -10)
+    }
+    #[cfg(not(feature = "rt-vcpu-fast-wake"))]
+    {
+        let _ = priority;
+        false
+    }
+}
+
+fn vcpu_wait(runtime: &VmRuntimeHandle, fast_wake: bool) {
+    if fast_wake {
+        for _ in 0..32768 {
+            core::hint::spin_loop();
+        }
+    }
+    wait(runtime);
+}
+
 /// Notifies the primary VCpu task associated with the specified VM to wake up and resume execution.
 /// This function is used to notify the primary VCpu of a VM to start running after the VM has been booted.
 ///
@@ -332,6 +353,7 @@ fn vcpu_run() {
     let vcpu = curr.as_vcpu_task().vcpu.clone();
     let vm_id = vm.id();
     let vcpu_id = vcpu.id();
+    let fast_wake = rt_vcpu_fast_wake_enabled(vcpu.host_sched_priority());
     let Ok(runtime) = vm.with_runtime(|runtime| Ok(runtime.clone())) else {
         warn!("VM[{vm_id}] vCPU runtime not found, VCpu[{vcpu_id}] exiting");
         return;
@@ -349,7 +371,7 @@ fn vcpu_run() {
 
         match CurrentArch::run_vcpu(&vm, &vcpu) {
             Ok(VcpuRunAction::Yield) => {}
-            Ok(VcpuRunAction::Wait) => wait(&runtime),
+            Ok(VcpuRunAction::Wait) => vcpu_wait(&runtime, fast_wake),
             Ok(VcpuRunAction::Stop(reason)) => {
                 if let Err(err) = vm.stop(reason) {
                     warn!("VM[{vm_id}] shutdown failed: {err:?}");
