@@ -100,6 +100,42 @@ cd os/axvisor && ./scripts/task1/build-arceos-rt-guest.sh
 
 报告输出目录：`plans/task1-reports/`。
 
+### 3.6 改造前后 stress 对比（2026-08 增补）
+
+| 脚本 | 基线 profile | 说明 |
+|---|---|---|
+| `run-stress-baseline-vs-opt-long.sh` | emulated timer + 无 priorities | **最佳证据**，180k 样本 |
+| `run-stress-strong-baseline-vs-opt-short.sh` | pCPU2 共核 + nice=19 | 8× CPU stress |
+| `run-stress-contended-baseline-vs-opt-short.sh` | pCPU3 与 Linux vCPU1 共核 | 含 `task1-baseline-slow-vtimer`（见下） |
+| `run-stress-host-share-baseline-vs-opt-short.sh` | pCPU0 与 AxVisor 宿主共核 | 最弱拓扑尝试 |
+| `run-stress-contended-baseline-vs-opt-long.sh` | contended 长稳 180k | ~70min |
+
+**注意**：`rt-latency` guest 使用 `thread::sleep`，不走 CNTP_TVAL 模拟路径；`task1-baseline-slow-vtimer` 对当前 P99 指标无效。
+
+实板（OrangePi-5-Plus / RK3588）VM 配置见 `configs/vms/orangepi-5-plus/*rt*`。
+
+**实板镜像与测试：**
+
+```bash
+# 1. 构建 RT guest flat 镜像
+./os/axvisor/scripts/task1/build-arceos-rt-guest-board.sh
+
+# 2. 部署到板子 Linux rootfs（需 BOARD_IP）
+./scripts/task1/deploy-board-rt-guest.sh <board-ip>
+
+# 3. 快速 smoke（200 样本，无 stress 环）
+SKIP_DEPLOY=1 ./scripts/task1/run-board-rt-smoke.sh
+cargo xtask axvisor test board --board orangepi-5-plus-linux -c board-orangepi-5-plus-mixed-rt-smoke
+
+# 4. stress 对比（18000 样本，需 self-hosted / board lease）
+CARGO_TARGET_DIR=$PWD/target ./scripts/task1/run-board-stress-baseline-vs-opt.sh
+```
+
+Test-suit 用例：
+- `test-suit/axvisor/normal/board-orangepi-5-plus-mixed-rt-smoke/`
+- `test-suit/axvisor/stress/board-orangepi-5-plus-mixed-rt-stress-baseline-short/`
+- `test-suit/axvisor/stress/board-orangepi-5-plus-mixed-rt-stress-round1-opt-short/`
+
 ---
 
 ## 4. 自动化测试
