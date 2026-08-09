@@ -154,6 +154,40 @@ cargo starry test board --board licheerv-nano-sg2002 --server <ip> --port <port>
 
 这里的 `--board licheerv-nano-sg2002` 用于选择 `test-suit/starryos` 下的 LicheeRV-Nano-SG2002 用例；实际向 ostool-server 申请的物理板卡类型写在用例配置中，当前同样为 `LicheeRV-Nano-SG2002`。
 
+### 3.2 Orange Pi 5 Plus（RK3588）
+
+完整刷写说明见 [StarryOS 实板刷写参考（RK3588 / VisionFive 2）](../../../os/StarryOS/doc/board-flash-rk3588-visionfive2.md)。
+
+```bash
+cargo starry defconfig orangepi-5-plus
+cargo starry build
+
+# 远程 ostool
+cargo starry board \
+  --board-config os/StarryOS/configs/board/orangepi-5-plus-board.toml
+
+# 或 test-suit 冒烟
+cargo starry test board --board orangepi-5-plus -c board-orangepi-5-plus/boot
+
+# 本地 U-Boot 串口（1500000 波特率）
+cargo starry uboot \
+  --uboot-config os/StarryOS/configs/board/orangepi-5-plus-uboot.toml
+```
+
+### 3.3 VisionFive 2
+
+详见同一篇 [实板刷写参考](../../../os/StarryOS/doc/board-flash-rk3588-visionfive2.md)。
+
+```bash
+cargo starry defconfig visionfive2
+cargo starry build
+
+cargo starry board \
+  --board-config os/StarryOS/configs/board/visionfive2-board.toml
+
+cargo starry test board --board visionfive2 -c board-visionfive2/boot
+```
+
 ## 4. 测试入口
 
 StarryOS 除了单次启动外，更常见的验证方式是直接进入测试套件。这里的命令会读取 `test-suit/starryos` 下的用例配置并运行；迁出的压力测试通过 Starry app 命令显式选择。

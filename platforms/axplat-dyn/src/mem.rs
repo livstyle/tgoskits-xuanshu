@@ -6,9 +6,11 @@ use someboot::ArchTrait;
 use somehal::mem::MemoryType;
 use spin::Once;
 
+const MMIO_REGION_CAPACITY: usize = 128;
+
 static FREE_LIST: Once<Vec<RawRange, 32>> = Once::new();
 static RESERVED_LIST: Once<Vec<RawRange, 32>> = Once::new();
-static MMIO_LIST: Once<Vec<RawRange, 16>> = Once::new();
+static MMIO_LIST: Once<Vec<RawRange, MMIO_REGION_CAPACITY>> = Once::new();
 
 #[cfg(target_arch = "x86_64")]
 const X86_FIXED_MMIO_RANGES: &[RawRange] = &[
@@ -185,4 +187,14 @@ fn to_somehal_dcache_op(op: DCacheOp) -> somehal::cache::DCacheOp {
 #[unsafe(no_mangle)]
 fn _percpu_base_ptr(idx: usize) -> *mut u8 {
     somehal::smp::percpu_data_ptr(idx).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mmio_capacity_covers_device_rich_platforms() {
+        assert!(MMIO_REGION_CAPACITY >= 128);
+    }
 }

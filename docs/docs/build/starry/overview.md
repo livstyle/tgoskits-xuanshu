@@ -70,6 +70,8 @@ cargo starry defconfig <board>
 
 把对应板卡配置复制到默认构建配置位置，并更新 StarryOS 命令快照。之后的 `build`/`qemu`/`uboot`/`board` 会沿用该配置。`<board>` 是板卡名称，可用 `config ls` 查看。
 
+Orange Pi 5 Plus、VisionFive 2 等实板刷写详见 [实板刷写参考](../../../os/StarryOS/doc/board-flash-rk3588-visionfive2.md)。
+
 ## config ls：列出可用板卡名称
 
 ```bash
@@ -92,6 +94,7 @@ cargo starry quick-start <platform> {build|run}
 |------|------|
 | `qemu-aarch64` / `qemu-riscv64` / `qemu-loongarch64` / `qemu-x86_64` | QEMU 平台的构建/运行 |
 | `orangepi-5-plus` | Orange Pi 5 Plus 板卡，run 支持 `--serial`/`--baud`/`--dtb` 覆盖 |
+| `visionfive2` | VisionFive 2 板卡 |
 | `licheerv-nano-sg2002` | LicheeRV Nano SG2002 板卡，run 支持 `--serial`/`--baud` 覆盖 |
 
 ## 推荐配置流程
@@ -116,10 +119,10 @@ cargo starry qemu
 cargo starry build --arch aarch64
 cargo starry qemu
 
-# 板卡流程
+# 板卡流程（远程 ostool 示例）
 cargo starry config ls
 cargo starry defconfig orangepi-5-plus
-cargo starry board
+cargo starry board --board-config os/StarryOS/configs/board/orangepi-5-plus-board.toml
 
 # 性能剖析
 cargo starry perf --format Svg --arch riscv64
