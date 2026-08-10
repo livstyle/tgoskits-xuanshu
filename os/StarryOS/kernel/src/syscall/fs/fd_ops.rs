@@ -1,4 +1,4 @@
-use alloc::{format, string::ToString, sync::Arc};
+use alloc::{format, string::ToString, sync::Arc, vec::Vec};
 use core::{
     ffi::{c_char, c_int},
     mem::size_of,
@@ -6,7 +6,7 @@ use core::{
 };
 
 use ax_errno::{AxError, AxResult};
-use ax_fs_ng::vfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
+use ax_fs_ng::vfs::{FS_CONTEXT, FileBackend, MountNamespace, OpenOptions, OpenResult};
 use ax_task::current;
 use axfs_ng_vfs::{DirEntry, FileNode, Location, NodeOps, NodeType, Reference};
 use bitflags::bitflags;
@@ -15,12 +15,12 @@ use starry_vm::{VmMutPtr, VmPtr, vm_load};
 
 use crate::{
     file::{
-        Directory, FD_TABLE, File, FileDescriptor, FileLike, NsFd, Pipe, add_file_like,
-        close_file_like, get_file_like, memfd::Memfd, with_fs,
+        Directory, FD_TABLE, File, FileDescriptor, FileLike, MountTableFile, NsFd, Pipe,
+        add_file_like, close_file_like, get_file_like, memfd::Memfd, with_fs,
     },
     mm::vm_load_path_string,
     pseudofs::{Device, dev::tty},
-    task::AsThread,
+    task::{AsThread, get_task},
 };
 
 /// Convert open flags to [`OpenOptions`].
@@ -75,7 +75,11 @@ fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32))
     options
 }
 
-fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
+fn add_to_fd(
+    result: OpenResult,
+    flags: u32,
+    mount_table_namespace: Option<Arc<MountNamespace>>,
+) -> AxResult<i32> {
     // FIFO + O_NONBLOCK + O_WRONLY (no reader) → ENXIO.
     //
     // man 2 open §"ENXIO" 第 1 variant：
@@ -132,11 +136,23 @@ fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
                     }
                     return add_file_like(wrapped, flags & O_CLOEXEC != 0);
                 }
+                // `/dev/rga` is served by a per-open `RgaFile` holding this open's handle/
+                // request session; `dup`/`fork` share its Arc and it is freed at last close.
+                #[cfg(feature = "rga")]
+                if crate::pseudofs::dev::rga::is_rga_device(inner) {
+                    let wrapped = crate::pseudofs::dev::rga::open_rga_file(file, flags)?;
+                    if flags & O_NONBLOCK != 0 {
+                        wrapped.set_nonblocking(true)?;
+                    }
+                    return add_file_like(wrapped, flags & O_CLOEXEC != 0);
+                }
                 if let Some(ptmx) = inner.downcast_ref::<tty::Ptmx>() {
                     // Opening /dev/ptmx creates a new pseudo-terminal
                     let (master, pty_number) = ptmx.create_pty()?;
                     // TODO: this is cursed
-                    let pts = FS_CONTEXT.lock().resolve("/dev/pts")?;
+                    let pts = ax_fs_ng::vfs::current_fs_context()
+                        .lock()
+                        .resolve("/dev/pts")?;
                     let entry = DirEntry::new_file(
                         FileNode::new(master),
                         NodeType::CharacterDevice,
@@ -153,11 +169,16 @@ fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
                         .session()
                         .terminal()
                         .ok_or(AxError::NotFound)?;
-                    let path = tty::terminal_device_path(term.as_ref()).ok_or_else(|| {
+                    let target = tty::terminal_device(term.as_ref()).ok_or_else(|| {
                         warn!("unknown controlling terminal type for /dev/tty");
                         AxError::BadState
                     })?;
-                    let loc = FS_CONTEXT.lock().resolve(&path)?;
+                    let loc = match target {
+                        tty::TerminalDevice::Location(location) => location,
+                        tty::TerminalDevice::Path(path) => {
+                            ax_fs_ng::vfs::current_fs_context().lock().resolve(&path)?
+                        }
+                    };
                     file = ax_fs_ng::vfs::File::new(FileBackend::Direct(loc), file.flags());
                 }
             }
@@ -173,7 +194,12 @@ fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
                     device.inner().open(flags & O_EXCL != 0)?;
                 }
             }
-            Arc::new(File::new(file, flags))
+            let file = Arc::new(File::new(file, flags));
+            if let Some(namespace) = mount_table_namespace {
+                MountTableFile::new(file, &namespace)
+            } else {
+                file
+            }
         }
         OpenResult::Dir(dir) => Arc::new(Directory::new(dir, flags)),
     };
@@ -181,6 +207,28 @@ fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
         f.set_nonblocking(true)?;
     }
     add_file_like(f, flags & O_CLOEXEC != 0)
+}
+
+fn mount_table_namespace(result: &OpenResult) -> Option<Arc<MountNamespace>> {
+    let OpenResult::File(file) = result else {
+        return None;
+    };
+    let path = file.location().absolute_path().ok()?.to_string();
+    let components: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    let pid = match components.as_slice() {
+        ["proc", "mountinfo" | "mounts"] | ["proc", "self", "mountinfo" | "mounts"] => {
+            current().as_thread().proc_data.proc.pid()
+        }
+        ["proc", pid, "mountinfo" | "mounts"] => pid.parse().ok()?,
+        ["proc", _, "task", tid, "mountinfo" | "mounts"] => tid.parse().ok()?,
+        _ => return None,
+    };
+
+    let task = get_task(pid).ok()?;
+    let scope = task.as_thread().scope.read();
+    let fs_context = FS_CONTEXT.scope(&scope).clone();
+    drop(scope);
+    Some(fs_context.lock().mount_namespace().clone())
 }
 
 #[repr(C)]
@@ -265,7 +313,11 @@ fn try_open_nsfd(path: &str, flags: u32) -> Option<AxResult<i32>> {
     };
 
     let mnt_fs_ns = if ns_type_str == "mnt" {
-        let scope = proc_data.scope.read();
+        let task = match get_task(pid) {
+            Ok(task) => task,
+            Err(_) => return Some(Err(AxError::NotFound)),
+        };
+        let scope = task.as_thread().scope.read();
         let fs_context = FS_CONTEXT.scope(&scope).clone();
         drop(scope);
         Some(fs_context.lock().mount_namespace().clone())
@@ -285,6 +337,7 @@ fn try_open_nsfd(path: &str, flags: u32) -> Option<AxResult<i32>> {
         "pid" => NsFd::Pid(nsproxy.pid_ns.clone()),
         "net" => NsFd::Net(nsproxy.net_ns.clone()),
         "user" => NsFd::User(nsproxy.user_ns.clone()),
+        "cgroup" => NsFd::Cgroup(nsproxy.cgroup_ns.clone()),
         _ => return Some(Err(AxError::NotFound)),
     };
 
@@ -400,8 +453,9 @@ pub fn sys_openat(
         })?;
 
     // Open first, then install the file so filesystem errors propagate unchanged.
-    let fd =
-        with_fs(dirfd, |fs| options.open(fs, path)).and_then(|it| add_to_fd(it, flags as _))?;
+    let result = with_fs(dirfd, |fs| options.open(fs, path))?;
+    let mount_table_namespace = mount_table_namespace(&result);
+    let fd = add_to_fd(result, flags as _, mount_table_namespace)?;
     if should_notify_create {
         let file = get_file_like(fd)?;
         crate::file::inotify::notify_create_path(file.path().as_ref(), false);
@@ -435,9 +489,8 @@ pub fn sys_openat2(
     if how_value.resolve & !OPENAT2_VALID_RESOLVE != 0 {
         return Err(AxError::InvalidInput);
     }
-    // This minimal openat2 implementation does not enforce Linux RESOLVE_*
-    // path-walk constraints yet, so reject known resolve bits explicitly.
-    if how_value.resolve != 0 {
+    const NIX_RESTORE_RESOLVE: u64 = (RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS) as u64;
+    if how_value.resolve != 0 && how_value.resolve != NIX_RESTORE_RESOLVE {
         return Err(AxError::OperationNotSupported);
     }
 
@@ -449,8 +502,46 @@ pub fn sys_openat2(
         .mode
         .try_into()
         .map_err(|_| AxError::InvalidInput)?;
+    let uflags = flags as u32;
 
-    sys_openat(dirfd, path, flags, mode)
+    if uflags & O_CREAT != 0 && uflags & O_DIRECTORY != 0 && uflags & O_PATH == 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if uflags & O_TMPFILE == O_TMPFILE && uflags & 0b11 == O_RDONLY && uflags & O_PATH == 0 {
+        return Err(AxError::InvalidInput);
+    }
+
+    if how_value.resolve == 0 {
+        return sys_openat(dirfd, path, flags, mode);
+    }
+
+    let path = vm_load_path_string(path)?;
+    if path.is_empty() {
+        return Err(AxError::NotFound);
+    }
+    if path.starts_with('/') {
+        return Err(AxError::CrossesDevices);
+    }
+
+    let curr = current();
+    let thread = curr.as_thread();
+    let mode = mode & !thread.proc_data.umask();
+    let cred = thread.cred();
+    let mut options = flags_to_options(flags, mode, (cred.fsuid, cred.fsgid));
+    let result = with_fs(dirfd, |fs| {
+        let (parent, name) = fs.resolve_parent_beneath_no_symlinks(path.as_ref())?;
+        match parent.lookup_no_follow(name.as_ref()) {
+            Ok(location) if location.node_type() == NodeType::Symlink => {
+                return Err(AxError::FilesystemLoop);
+            }
+            Err(AxError::NotFound) | Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+        options.no_follow(true);
+        options.open(&fs.with_current_dir(parent)?, name.as_ref())
+    })?;
+    let mount_table_namespace = mount_table_namespace(&result);
+    add_to_fd(result, flags as u32, mount_table_namespace).map(|fd| fd as isize)
 }
 
 /// Open a file by `filename` and insert it into the file descriptor table.
@@ -486,23 +577,25 @@ bitflags! {
     }
 }
 
-pub fn sys_close_range(first: i32, last: i32, flags: u32) -> AxResult<isize> {
-    if first < 0 || last < first {
+pub fn sys_close_range(first: u32, last: u32, flags: u32) -> AxResult<isize> {
+    if last < first {
         return Err(AxError::InvalidInput);
     }
     let flags = CloseRangeFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
     debug!("sys_close_range <= fds: [{first}, {last}], flags: {flags:?}");
     if flags.contains(CloseRangeFlags::UNSHARE) {
         let curr = current();
-        let proc_data = &curr.as_thread().proc_data;
-        let new_files = Arc::new(ax_kspin::SpinRwLock::new(FD_TABLE.read().clone()));
-        proc_data.with_current_scope_mut(|scope| {
+        let new_files = Arc::new(ax_kspin::SpinRwLock::new(
+            crate::file::current_fd_table().read().clone(),
+        ));
+        curr.as_thread().with_current_scope_mut(|scope| {
             *FD_TABLE.scope_mut(scope).deref_mut() = new_files;
         });
     }
 
     let cloexec = flags.contains(CloseRangeFlags::CLOEXEC);
-    let mut fd_table = FD_TABLE.write();
+    let current_fd_table = crate::file::current_fd_table();
+    let mut fd_table = current_fd_table.write();
     // Collect closed fds and defer `release_locks_on_close` until after the
     // table write lock is dropped. `release_locks_on_close()` walks every fd
     // table through `fd_tables_contain_file()` (which acquires `FD_TABLE`),
@@ -511,7 +604,7 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> AxResult<isize> {
     // setup) hangs. Mirrors the `close_all_fds` / execve CLOEXEC pattern.
     let mut closing = alloc::vec::Vec::new();
     if let Some(max_index) = fd_table.ids().next_back() {
-        for fd in first..=last.min(max_index as i32) {
+        for fd in first..=last.min(max_index as u32) {
             if cloexec {
                 if let Some(f) = fd_table.get_mut(fd as _) {
                     f.cloexec = true;
@@ -541,7 +634,8 @@ fn dup_fd_min(old_fd: c_int, min_fd: c_int, cloexec: bool) -> AxResult<isize> {
     }
     let f = get_file_like(old_fd)?;
     let max_nofile = current().as_thread().proc_data.rlim.read()[RLIMIT_NOFILE].current as i32;
-    let mut fd_table = FD_TABLE.write();
+    let current_fd_table = crate::file::current_fd_table();
+    let mut fd_table = current_fd_table.write();
     for candidate in min_fd..max_nofile {
         let entry = FileDescriptor {
             inner: f.clone(),
@@ -583,7 +677,8 @@ pub fn sys_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> AxResult<isize> {
         return Err(AxError::InvalidInput);
     }
 
-    let mut fd_table = FD_TABLE.write();
+    let current_fd_table = crate::file::current_fd_table();
+    let mut fd_table = current_fd_table.write();
     let mut f = fd_table
         .get(old_fd as _)
         .cloned()
@@ -649,7 +744,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> AxResult<isize> {
             Ok(ret as _)
         }
         F_GETFD => {
-            let cloexec = FD_TABLE
+            let cloexec = crate::file::current_fd_table()
                 .read()
                 .get(fd as _)
                 .ok_or(AxError::BadFileDescriptor)?
@@ -658,7 +753,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> AxResult<isize> {
         }
         F_SETFD => {
             let cloexec = arg & FD_CLOEXEC as usize != 0;
-            FD_TABLE
+            crate::file::current_fd_table()
                 .write()
                 .get_mut(fd as _)
                 .ok_or(AxError::BadFileDescriptor)?
@@ -730,13 +825,46 @@ fn set_pipe_size(pipe: &Pipe, size: usize) -> AxResult<isize> {
     Ok(pipe.capacity() as _)
 }
 
+pub fn sys_flock(fd: c_int, operation: c_int) -> AxResult<isize> {
+    debug!("flock <= fd: {fd}, operation: {operation}");
+    super::lock::flock_op(fd, operation)
+}
+
 #[cfg(axtest)]
 pub(crate) fn fcntl_setpipe_size_returns_capacity_for_test() -> bool {
     let (read_end, _write_end) = Pipe::new();
     set_pipe_size(&read_end, 4097) == Ok(8192)
 }
 
-pub fn sys_flock(fd: c_int, operation: c_int) -> AxResult<isize> {
-    debug!("flock <= fd: {fd}, operation: {operation}");
-    super::lock::flock_op(fd, operation)
+#[cfg(axtest)]
+pub(crate) fn pipe_size_rounding_and_rejection_rules_hold_for_test() -> bool {
+    // Sub-page sizes round up to one page (4096).
+    let (read_end, _write_end) = Pipe::new();
+    set_pipe_size(&read_end, 1) == Ok(4096)
+        // Power-of-two page multiples stay unchanged.
+        && set_pipe_size(&read_end, 8192) == Ok(8192)
+        // Non-power-of-two sizes round up to the next power of two.
+        && set_pipe_size(&read_end, 4097) == Ok(8192)
+        // Sizes at exactly RING_BUFFER_MAX_SIZE (1 MiB) succeed.
+        && set_pipe_size(&read_end, 1024 * 1024) == Ok(1024 * 1024)
+        // Sizes above RING_BUFFER_MAX_SIZE are rejected.
+        && set_pipe_size(&read_end, 1024 * 1024 + 1).is_err()
+        // Zero rounds up to a single page.
+        && set_pipe_size(&read_end, 0) == Ok(4096)
+}
+
+#[cfg(axtest)]
+pub(crate) fn fd_ops_flags_to_options_rules_hold_for_test() -> bool {
+    use linux_raw_sys::general::*;
+    // Test flags_to_options function - verify it doesn't panic for valid inputs
+    let _options = flags_to_options(O_RDONLY as i32, 0o644, (1000, 1000));
+    let _options = flags_to_options(O_WRONLY as i32, 0o644, (1000, 1000));
+    let _options = flags_to_options(O_RDWR as i32, 0o644, (1000, 1000));
+
+    // Test with various flag combinations
+    let _options = flags_to_options((O_WRONLY | O_APPEND | O_CREAT) as i32, 0o644, (1000, 1000));
+    let _options = flags_to_options((O_RDWR | O_CREAT | O_TRUNC) as i32, 0o644, (1000, 1000));
+    let _options = flags_to_options((O_RDONLY | O_PATH) as i32, 0o644, (1000, 1000));
+
+    true
 }

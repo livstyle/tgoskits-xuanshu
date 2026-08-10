@@ -385,7 +385,7 @@ mod tests {
         System {
             ecam_regions: Vec::new(),
             routing,
-            interpreter: interpreter_with_devices(handler.clone()),
+            interpreter: Some(interpreter_with_devices(handler.clone())),
             handler,
             pci: None,
             probed_names: Mutex::new(alloc::collections::BTreeSet::new()),
@@ -740,6 +740,33 @@ pub struct AcpiResourceRange {
     pub size: u64,
 }
 
+/// Register model selected by the host SPCR table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpiSerialInterface {
+    Uart16550,
+    Pl011,
+}
+
+/// Address-space kind selected by the host SPCR table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpiSerialAddressSpace {
+    Memory,
+    Io,
+}
+
+/// Owned, parser-independent host serial-console description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpiSerialConsole {
+    pub interface: AcpiSerialInterface,
+    pub address_space: AcpiSerialAddressSpace,
+    pub registers: AcpiResourceRange,
+    pub access_size: u8,
+    pub irq: Option<u32>,
+    pub baud_rate: Option<u32>,
+    pub clock_hz: Option<u32>,
+    pub namespace_path: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpiResourceDevice {
     pub path: String,
@@ -891,6 +918,15 @@ pub fn check_root(root: AcpiRoot) -> Result<(), DriverError> {
 
 pub fn init(root: AcpiRoot) -> Result<(), DriverError> {
     let system = System::new(root)?;
+    init_system(system)
+}
+
+pub fn init_without_aml(root: AcpiRoot) -> Result<(), DriverError> {
+    let system = System::new_without_aml(root)?;
+    init_system(system)
+}
+
+fn init_system(system: System) -> Result<(), DriverError> {
     info!(
         "ACPI initialized: {} PCI ECAM region(s), {} IOAPIC(s), {} PCH-PIC(s)",
         system.pci_ecam_regions().len(),
@@ -1134,7 +1170,7 @@ impl AcpiRoot {
 pub struct System {
     ecam_regions: Vec<AcpiPciEcam>,
     routing: AcpiRouting,
-    interpreter: Interpreter<AcpiHandler>,
+    interpreter: Option<Interpreter<AcpiHandler>>,
     handler: AcpiHandler,
     pci: Option<AcpiPciNamespace>,
     probed_names: Mutex<BTreeSet<&'static str>>,
@@ -1160,21 +1196,35 @@ struct AcpiPciRoot {
 
 impl System {
     pub fn new(root: AcpiRoot) -> Result<Self, DriverError> {
+        Self::new_with_options(root, true)
+    }
+
+    pub fn new_without_aml(root: AcpiRoot) -> Result<Self, DriverError> {
+        Self::new_with_options(root, false)
+    }
+
+    fn new_with_options(root: AcpiRoot, load_aml: bool) -> Result<Self, DriverError> {
         let handler = root.handler();
         let tables =
             unsafe { AcpiTables::from_rsdp(handler.clone(), root.rsdp) }.map_err(acpi_error)?;
         let ecam_regions = read_pci_ecam_regions(&tables)?;
         let routing = read_interrupt_routing(&tables)?;
         let namespace_handler = root.handler_with_pci_ecam(ecam_regions.clone());
-        let platform = AcpiPlatform::new(tables, namespace_handler.clone()).map_err(acpi_error)?;
-        let interpreter = Interpreter::new_from_platform(&platform).map_err(acpi_error)?;
-        interpreter.initialize_namespace();
-        let pci = match read_pci_namespace(&interpreter) {
-            Ok(pci) => Some(pci),
-            Err(err) => {
-                warn!("failed to discover ACPI PCI namespace: {err:?}");
-                None
-            }
+        let (interpreter, pci) = if load_aml {
+            let platform =
+                AcpiPlatform::new(tables, namespace_handler.clone()).map_err(acpi_error)?;
+            let interpreter = Interpreter::new_from_platform(&platform).map_err(acpi_error)?;
+            interpreter.initialize_namespace();
+            let pci = match read_pci_namespace(&interpreter) {
+                Ok(pci) => Some(pci),
+                Err(err) => {
+                    warn!("failed to discover ACPI PCI namespace: {err:?}");
+                    None
+                }
+            };
+            (Some(interpreter), pci)
+        } else {
+            (None, None)
         };
 
         Ok(Self {
@@ -1227,18 +1277,50 @@ impl System {
         })
     }
 
-    pub fn serial_console_memory_range(&self) -> Option<AcpiResourceRange> {
-        let tables = self.handler.root.tables().ok()?;
-        let spcr = tables.find_table::<acpi::sdt::spcr::Spcr>()?;
-        let address = spcr.base_address()?.ok()?;
-        if address.address_space != acpi::address::AddressSpace::SystemMemory {
-            return None;
-        }
-
-        Some(AcpiResourceRange {
-            base: address.address,
-            size: spcr_uart_register_size(address.access_size),
-        })
+    /// Returns the SPCR-selected serial console as an owned descriptor.
+    pub fn serial_console(&self) -> Result<Option<AcpiSerialConsole>, DriverError> {
+        let tables = unsafe { AcpiTables::from_rsdp(self.handler.clone(), self.handler.root.rsdp) }
+            .map_err(acpi_error)?;
+        let Some(spcr) = tables.find_tables::<Spcr>().next() else {
+            return Ok(None);
+        };
+        let interface = match spcr.interface_type() {
+            SpcrInterfaceType::Full16550
+            | SpcrInterfaceType::Full16450
+            | SpcrInterfaceType::Generic16550 => AcpiSerialInterface::Uart16550,
+            SpcrInterfaceType::ArmPL011 => AcpiSerialInterface::Pl011,
+            _ => return Err(DriverError::Unsupported("host SPCR serial interface")),
+        };
+        let address = spcr
+            .base_address()
+            .ok_or_else(|| DriverError::Unknown("host SPCR has no serial register address".into()))?
+            .map_err(acpi_error)?;
+        let address_space = match address.address_space {
+            AddressSpace::SystemMemory => AcpiSerialAddressSpace::Memory,
+            AddressSpace::SystemIo => AcpiSerialAddressSpace::Io,
+            _ => return Err(DriverError::Unsupported("host SPCR serial address space")),
+        };
+        let namespace_path = spcr
+            .namespace_string()
+            .map_err(|error| DriverError::Unknown(format!("invalid host SPCR namespace: {error}")))?
+            .trim_end_matches('\0')
+            .to_string();
+        Ok(Some(AcpiSerialConsole {
+            interface,
+            address_space,
+            registers: AcpiResourceRange {
+                base: address.address,
+                size: spcr_uart_register_size(address.access_size),
+            },
+            access_size: address.access_size,
+            irq: spcr
+                .global_system_interrupt()
+                .or_else(|| spcr.irq().map(u32::from)),
+            baud_rate: spcr.baud_rate().map(|value| value.get()),
+            clock_hz: spcr.uart_clock_frequency().map(|value| value.get()),
+            namespace_path: (!namespace_path.is_empty() && namespace_path != ".")
+                .then_some(namespace_path),
+        }))
     }
 
     pub fn pci_irq_for_endpoint(
@@ -1302,7 +1384,9 @@ impl System {
                         u16::from(route.root_device),
                         u16::from(route.root_function),
                         pin,
-                        &self.interpreter,
+                        self.interpreter
+                            .as_ref()
+                            .expect("ACPI PCI routing requires an AML interpreter"),
                         &self.handler,
                         &mut pci.link_allocator.lock(),
                     )
@@ -1315,7 +1399,9 @@ impl System {
                 u16::from(route.root_device),
                 u16::from(route.root_function),
                 pin,
-                &self.interpreter,
+                self.interpreter
+                    .as_ref()
+                    .expect("ACPI PCI routing requires an AML interpreter"),
             ) {
                 Ok(route) => return Ok(Some(route)),
                 Err(AmlError::PrtNoEntry) => {}
@@ -1355,20 +1441,23 @@ impl System {
     }
 
     fn device_infos_for_ids(&self, ids: &[AcpiId]) -> Result<Vec<AcpiDeviceInfo>, ProbeError> {
+        let Some(interpreter) = &self.interpreter else {
+            return Ok(Vec::new());
+        };
         let mut devices = Vec::new();
-        let mut namespace = self.interpreter.namespace.lock().clone();
+        let mut namespace = interpreter.namespace.lock().clone();
         namespace
             .traverse(|path, level| {
                 if level.kind != NamespaceLevelKind::Device {
                     return Ok(true);
                 }
-                let Some((hid, cids)) = acpi_device_ids(&self.interpreter, path)? else {
+                let Some((hid, cids)) = acpi_device_ids(interpreter, path)? else {
                     return Ok(true);
                 };
                 if !acpi_ids_match(&hid, &cids, ids) {
                     return Ok(true);
                 }
-                let resources = read_device_resources(&self.interpreter, path, &self.routing)?;
+                let resources = read_device_resources(interpreter, path, &self.routing)?;
                 devices.push(AcpiDeviceInfo {
                     path: path.as_string(),
                     hid: Some(hid),
@@ -1384,17 +1473,20 @@ impl System {
     }
 
     fn device_infos(&self) -> Result<Vec<AcpiDeviceInfo>, ProbeError> {
+        let Some(interpreter) = &self.interpreter else {
+            return Ok(Vec::new());
+        };
         let mut devices = Vec::new();
-        let mut namespace = self.interpreter.namespace.lock().clone();
+        let mut namespace = interpreter.namespace.lock().clone();
         namespace
             .traverse(|path, level| {
                 if level.kind != NamespaceLevelKind::Device {
                     return Ok(true);
                 }
-                let Some((hid, cids)) = acpi_device_ids(&self.interpreter, path)? else {
+                let Some((hid, cids)) = acpi_device_ids(interpreter, path)? else {
                     return Ok(true);
                 };
-                let resources = read_device_resources(&self.interpreter, path, &self.routing)?;
+                let resources = read_device_resources(interpreter, path, &self.routing)?;
                 devices.push(AcpiDeviceInfo {
                     path: path.as_string(),
                     hid: Some(hid),
@@ -1431,6 +1523,7 @@ impl System {
                         name: register.name,
                         device_id: DeviceId::new(),
                         irq_parent: None,
+                        fdt_node: None,
                     };
                     let device_id = desc.device_id();
                     let info = AcpiInfo {
@@ -1453,6 +1546,7 @@ impl System {
                 name: register.name,
                 device_id: DeviceId::new(),
                 irq_parent: None,
+                fdt_node: None,
             };
             let info = AcpiInfo {
                 root: self,

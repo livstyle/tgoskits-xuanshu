@@ -2,7 +2,6 @@ features = [
     "ax-driver/virtio-blk",
     "fs",
     "sched-cfs",
-    "task1-rt-opt",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"

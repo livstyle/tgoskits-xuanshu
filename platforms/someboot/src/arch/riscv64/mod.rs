@@ -2,6 +2,7 @@
 mod _macros;
 
 mod addrspace;
+mod boot;
 mod console;
 mod entry;
 pub(crate) mod irq;
@@ -13,16 +14,16 @@ mod trap;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) use entry::_secondary_entry;
-use page_table_generic::{MemAttributes, PageTableEntry, PhysAddr, PteConfig, TableMeta, VirtAddr};
+use page_table_generic::{PageTableEntry, PhysAddr, TableMeta, VirtAddr};
 pub use relocate::apply as relocate;
 
 use crate::{
     ArchTrait, DCacheOp,
-    mem::{PageTableInfo, mmu},
+    mem::{MemAttributes, PageTableInfo, PteConfig, mmu},
     power::CpuOnError,
 };
 #[cfg(any(uspace, hv))]
-use crate::{mem::__kimage_va_to_pa, smp::percpu_va_range};
+use crate::{mem::__kimage_va_to_pa, smp::cpu_area_virtual_region};
 
 const SATP_MODE_SV39: usize = 8usize << 60;
 const SSTATUS_SIE: usize = 1 << 1;
@@ -94,71 +95,77 @@ fn thead_mae_mem_attr(_bits: usize) -> MemAttributes {
 pub struct Entry(usize);
 
 impl PageTableEntry for Entry {
-    fn from_config(config: PteConfig) -> Self {
-        if !config.valid {
-            return Self(0);
-        }
+    type PteConfig = PteConfig;
 
+    fn new_page(paddr: PhysAddr, config: Self::PteConfig, _is_huge: bool) -> Self {
         let mut bits = PTE_V;
-        let is_leaf = !config.is_dir || config.huge;
-        if is_leaf {
-            if config.read {
-                bits |= PTE_R;
-            }
-            if config.writable {
-                bits |= PTE_W;
-            }
-            if config.executable {
-                bits |= PTE_X;
-            }
-            if config.lower {
-                bits |= PTE_U;
-            }
-            if config.global {
-                bits |= PTE_G;
-            }
-            if config.valid {
-                bits |= PTE_A;
-            }
-            if config.writable || config.dirty {
-                bits |= PTE_D;
-            }
-            bits |= thead_mae_pte_bits(config.mem_attr);
+        if config.read {
+            bits |= PTE_R;
         }
+        if config.writable {
+            bits |= PTE_W;
+        }
+        if config.executable {
+            bits |= PTE_X;
+        }
+        if config.lower {
+            bits |= PTE_U;
+        }
+        if config.global {
+            bits |= PTE_G;
+        }
+        bits |= PTE_A;
+        if config.writable || config.dirty {
+            bits |= PTE_D;
+        }
+        bits |= thead_mae_pte_bits(config.mem_attr);
 
-        bits |= ((config.paddr.raw() >> 12) & PTE_PPN_MASK) << SV39_PPN_SHIFT;
+        bits |= ((paddr.as_usize() >> 12) & PTE_PPN_MASK) << SV39_PPN_SHIFT;
         Self(bits)
     }
 
-    fn to_config(&self, is_dir: bool) -> PteConfig {
+    fn new_table(paddr: PhysAddr) -> Self {
+        let bits = PTE_V | ((paddr.as_usize() >> 12) & PTE_PPN_MASK) << SV39_PPN_SHIFT;
+        Self(bits)
+    }
+
+    fn paddr(&self, _is_dir: bool) -> PhysAddr {
+        PhysAddr::from_usize(((self.0 >> SV39_PPN_SHIFT) & PTE_PPN_MASK) << 12)
+    }
+
+    fn config(&self, _is_dir: bool) -> Self::PteConfig {
         let bits = self.0;
-        let valid = (bits & PTE_V) != 0;
         let read = (bits & PTE_R) != 0;
         let writable = (bits & PTE_W) != 0;
         let executable = (bits & PTE_X) != 0;
         let lower = (bits & PTE_U) != 0;
         let global = (bits & PTE_G) != 0;
         let dirty = (bits & PTE_D) != 0;
-        let huge = is_dir && (read || writable || executable);
-        let paddr = PhysAddr::new(((bits >> SV39_PPN_SHIFT) & PTE_PPN_MASK) << 12);
-
         PteConfig {
-            paddr,
-            valid,
             read,
             writable,
             executable,
             lower,
             dirty,
             global,
-            is_dir,
-            huge,
             mem_attr: thead_mae_mem_attr(bits),
         }
     }
 
-    fn valid(&self) -> bool {
+    fn present(&self) -> bool {
         (self.0 & PTE_V) != 0
+    }
+
+    fn huge(&self, is_dir: bool) -> bool {
+        is_dir && (self.0 & (PTE_R | PTE_W | PTE_X)) != 0
+    }
+
+    fn unused(&self) -> bool {
+        self.0 == 0
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
     }
 }
 
@@ -189,16 +196,12 @@ impl ArchTrait for Arch {
         (paddr + addrspace::PAGE_OFFSET) as *mut u8
     }
 
-    fn _percpu(paddr: usize) -> *mut u8 {
+    fn cpu_area_phys_to_virt(paddr: usize) -> *mut u8 {
         (paddr + addrspace::PERCPU_BASE) as *mut u8
     }
 
     fn cpu_current_hartid() -> usize {
-        let hart_id: usize;
-        unsafe {
-            core::arch::asm!("mv {hart_id}, tp", hart_id = out(reg) hart_id, options(nostack, preserves_flags));
-        }
-        hart_id
+        boot::current().hart_id()
     }
 
     fn jump_to(entry: usize, sp: usize) -> ! {
@@ -228,7 +231,7 @@ impl ArchTrait for Arch {
         #[cfg(any(uspace, hv))]
         {
             if mmu::is_kernel_relocated() {
-                if percpu_va_range().contains(&vaddr) {
+                if cpu_area_virtual_region().contains(&vaddr) {
                     return vaddr - addrspace::PERCPU_BASE;
                 }
                 if vaddr >= crate::consts::VM_LOAD_ADDRESS {
@@ -377,6 +380,12 @@ impl ArchTrait for Arch {
             core::arch::asm!("csrr {ticks}, time", ticks = out(reg) ticks, options(nostack, preserves_flags));
         }
         ticks
+    }
+
+    fn systimer_stability() -> crate::timer::CounterStability {
+        // The time CSR is a hart-local view of the platform-wide real-time
+        // counter advertised by the firmware timebase.
+        crate::timer::CounterStability::Stable
     }
 
     fn irq_all_is_enabled() -> bool {

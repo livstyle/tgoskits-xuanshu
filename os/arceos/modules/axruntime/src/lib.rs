@@ -50,6 +50,8 @@ mod stack_protector;
 #[cfg(feature = "smp")]
 mod mp;
 
+#[cfg(feature = "paging")]
+mod kernel_mapping;
 mod klib;
 
 mod devices;
@@ -57,6 +59,8 @@ mod fs;
 #[cfg(feature = "irq")]
 pub mod irq;
 mod registers;
+#[cfg(feature = "serial")]
+pub mod serial;
 
 #[cfg(all(feature = "net", feature = "fs"))]
 mod unix_ns;
@@ -126,6 +130,10 @@ fn runtime_page_fault_handler(
 #[ax_crate_interface::impl_interface]
 impl ax_log::LogIf for LogIfImpl {
     fn console_write_str(s: &str) {
+        #[cfg(feature = "serial")]
+        if serial::route_console_bytes(s.as_bytes()).is_some() {
+            return;
+        }
         ax_hal::console::write_text_bytes(s.as_bytes());
     }
 
@@ -300,6 +308,9 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
 
     devices::probe_all_devices();
 
+    #[cfg(feature = "serial")]
+    serial::init(cpu_id);
+
     #[cfg(feature = "rtc")]
     ax_println!(
         "Boot at {}\n",
@@ -340,6 +351,9 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
 
     #[cfg(all(feature = "irq", feature = "ipi"))]
     ax_ipi::wait_for_all_cpus_ready();
+
+    #[cfg(all(feature = "smp", feature = "ipi"))]
+    fs::online_smp();
 
     ax_app_entry();
 
@@ -407,7 +421,10 @@ fn init_interrupt() {
     ax_hal::asm::enable_irqs();
 
     #[cfg(feature = "ipi")]
-    ax_ipi::mark_current_cpu_ready();
+    {
+        ax_hal::asm::flush_tlb(None);
+        ax_ipi::mark_current_cpu_ready();
+    }
 }
 
 #[cfg(feature = "irq")]
@@ -434,7 +451,7 @@ unsafe fn ax_ipi_run_on_cpu_sync(
     f: unsafe fn(*mut ()),
     arg: *mut (),
 ) -> Result<(), ax_hal::irq::IrqError> {
-    unsafe { ax_ipi::run_on_cpu_sync_raw(cpu, f, arg) }
+    unsafe { ax_ipi::call_on_cpu(ax_hal::irq::CpuId(cpu), f, arg) }
 }
 
 #[cfg(feature = "irq")]
@@ -447,24 +464,35 @@ fn periodic_interval_nanos() -> u64 {
 static NEXT_PERIODIC_DEADLINE_NANOS: u64 = 0;
 
 #[cfg(feature = "irq")]
+fn with_periodic_deadline<R>(
+    operation: impl for<'scope> FnOnce(&ax_percpu::CpuPin<'scope>) -> R,
+) -> R {
+    // SAFETY: every caller runs either during offline CPU initialization or in
+    // the local timer IRQ path. Both contexts prevent migration for the whole
+    // callback, and the CPU-local area was installed before runtime entry.
+    unsafe { ax_percpu::with_cpu_pin(operation) }
+        .unwrap_or_else(|error| panic!("timer CPU-local state is invalid: {error}"))
+}
+
+#[cfg(feature = "irq")]
 fn init_timer() {
     ax_hal::time::enable_timer_irq();
     let now_ns = ax_hal::time::monotonic_time_nanos();
-    unsafe {
+    with_periodic_deadline(|pin| {
         NEXT_PERIODIC_DEADLINE_NANOS
-            .write_current_raw(now_ns.saturating_add(periodic_interval_nanos()));
-    }
+            .write_current(pin, now_ns.saturating_add(periodic_interval_nanos()));
+    });
     program_next_timer();
 }
 
 #[cfg(feature = "irq")]
 fn advance_periodic_timer(now_ns: u64) -> bool {
-    let mut deadline = unsafe { NEXT_PERIODIC_DEADLINE_NANOS.read_current_raw() };
+    let mut deadline = with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.read_current(pin));
     if deadline == 0 {
-        unsafe {
+        with_periodic_deadline(|pin| {
             NEXT_PERIODIC_DEADLINE_NANOS
-                .write_current_raw(now_ns.saturating_add(periodic_interval_nanos()));
-        }
+                .write_current(pin, now_ns.saturating_add(periodic_interval_nanos()));
+        });
         return false;
     }
     if now_ns < deadline {
@@ -477,20 +505,22 @@ fn advance_periodic_timer(now_ns: u64) -> bool {
             break;
         }
     }
-    unsafe { NEXT_PERIODIC_DEADLINE_NANOS.write_current_raw(deadline) };
+    with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.write_current(pin, deadline));
     true
 }
 
 #[cfg(feature = "irq")]
 fn program_next_timer() {
-    let mut deadline = unsafe { NEXT_PERIODIC_DEADLINE_NANOS.read_current_raw() };
+    let mut deadline = with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.read_current(pin));
     if deadline == 0 {
         let now_ns = ax_hal::time::monotonic_time_nanos();
         deadline = now_ns.saturating_add(periodic_interval_nanos());
-        unsafe { NEXT_PERIODIC_DEADLINE_NANOS.write_current_raw(deadline) };
+        with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.write_current(pin, deadline));
     }
     #[cfg(feature = "multitask")]
-    if let Some(task_deadline) = ax_task::next_timer_deadline_nanos() {
+    let task_deadline = ax_task::next_timer_deadline_nanos();
+    #[cfg(feature = "multitask")]
+    if let Some(task_deadline) = task_deadline {
         deadline = core::cmp::min(deadline, task_deadline);
     }
 
@@ -502,6 +532,10 @@ fn program_next_timer() {
 #[cfg(feature = "irq")]
 fn timer_irq_handler(ctx: ax_hal::irq::IrqContext) -> ax_hal::irq::IrqReturn {
     let _ = ctx;
+    // SAFETY: the local timer IRQ excludes migration and nested local
+    // scheduler-clock publication for this complete stamp.
+    unsafe { ax_hal::time::scheduler_clock_tick() }
+        .expect("current CPU scheduler clock must be online before timer IRQs");
     #[cfg(feature = "multitask")]
     let scheduler_tick = advance_periodic_timer(ax_hal::time::monotonic_time_nanos());
     #[cfg(not(feature = "multitask"))]
@@ -514,7 +548,12 @@ fn timer_irq_handler(ctx: ax_hal::irq::IrqContext) -> ax_hal::irq::IrqReturn {
 
 #[cfg(all(feature = "irq", feature = "ipi"))]
 fn ipi_irq_handler(_ctx: ax_hal::irq::IrqContext) -> ax_hal::irq::IrqReturn {
-    ax_ipi::ipi_handler();
+    ax_ipi::claim_current_delivery();
+    #[cfg(all(feature = "multitask", feature = "smp"))]
+    ax_task::handle_ipi_reschedule();
+    ax_ipi::drain_hard_calls()
+        .unwrap_or_else(|error| panic!("failed to continue hard-call draining: {error:?}"));
+    ax_ipi::legacy::drain_current_callbacks();
     ax_hal::irq::IrqReturn::Handled
 }
 
@@ -526,7 +565,8 @@ fn ipi_irq_handler(_ctx: ax_hal::irq::IrqContext) -> ax_hal::irq::IrqReturn {
 #[cfg(all(feature = "tls", not(feature = "multitask")))]
 fn init_tls() {
     let main_tls = ax_hal::tls::TlsArea::alloc();
-    unsafe { ax_hal::asm::write_thread_pointer(main_tls.tls_ptr() as usize) };
+    let kernel_tls = ax_hal::context::KernelTlsBase::new(main_tls.tls_ptr() as usize);
+    unsafe { ax_hal::asm::write_thread_pointer(kernel_tls) };
     core::mem::forget(main_tls);
 }
 
@@ -534,6 +574,6 @@ fn init_tls() {
 mod tests {
     #[test]
     fn fs_init_accepts_bootargs_without_fs_feature() {
-        crate::fs::init(Some("root=/dev/vda"));
+        crate::fs::init(Some("root=/dev/nvme0n1"));
     }
 }

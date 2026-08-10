@@ -1,8 +1,8 @@
 use alloc::collections::VecDeque;
 use core::{
-    arch::asm,
+    arch::naked_asm,
     fmt::{Debug, Formatter, Result as FmtResult},
-    mem::size_of,
+    mem::{offset_of, size_of},
 };
 
 use bit_field::BitField;
@@ -15,29 +15,19 @@ use x86_64::registers::{
 use x86_vlapic::EmulatedLocalApic;
 
 use super::{
-    definitions::{SvmExitCode, SvmIntercept},
-    flags::{InterruptType, VmcbIntInfo},
-    structs::{IOPm, MSRPm, VmcbFrame},
-    vmcb::{InterceptCrRw, InterceptExceptions, NestedCtl, VmcbTlbControl, set_vmcb_segment},
+    definitions::*,
+    flags::*,
+    structs::*,
+    vmcb::{VmcbTlbControl, *},
 };
-use crate::{
-    X86AccessFlags, X86AccessWidth, X86GuestPhysAddr, X86GuestVirtAddr, X86HostOps,
-    X86HostPhysAddr, X86MsrAddr, X86NestedPageFaultInfo, X86NestedPagingConfig, X86Port,
-    X86VCpuCreateConfig, X86VCpuSetupConfig, X86VcpuError, X86VcpuResult, X86VmExit, host,
-    msr::Msr, regs::GeneralRegisters, restore_host_interrupt_flag, x86_real_mode_entry_state,
-    xstate::XState,
-};
+use crate::{msr::*, port_io::*, regs::*, xstate::*, *};
 
 const QEMU_EXIT_PORT: u16 = 0x604;
 const X86_PIT_PORT_BASE: u16 = 0x40;
 const X86_PIT_PORT_COUNT: u32 = 4;
 const X86_PIT_SPEAKER_PORT: u16 = 0x61;
-const X86_COM1_PORT_BASE: u16 = 0x3f8;
-const X86_COM1_PORT_COUNT: u32 = 8;
 const X86_IOAPIC_BASE: usize = 0xfec0_0000;
 const X86_IOAPIC_SIZE: usize = 0x1000;
-const X86_LOCAL_APIC_BASE: usize = 0xfee0_0000;
-const X86_LOCAL_APIC_SIZE: usize = 0x1000;
 const X86_LOCAL_APIC_EOI_OFFSET: usize = 0xb0;
 
 const APIC_BASE_MSR: u32 = 0x1b;
@@ -136,11 +126,99 @@ pub enum VmCpuMode {
     Mode64,
 }
 
+struct SvmIoExitInfo {
+    is_in: bool,
+    is_string: bool,
+    is_repeat: bool,
+    width: X86AccessWidth,
+    address_size: Option<X86AddressSize>,
+    segment: u8,
+    port: X86Port,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PendingEvent {
     vector: u8,
     err_code: Option<u32>,
     level_triggered: bool,
+}
+
+/// Register memory shared with the SVM world-switch assembly.
+///
+/// Guest GPRs occupy the first 128 bytes so the save/restore macros can use
+/// this object as a synthetic stack. The remaining fields are host-owned and
+/// are never installed as guest register state.
+#[repr(C)]
+struct SvmWorldSwitchFrame {
+    guest_regs: GeneralRegisters,
+    host_stack_top: u64,
+    host_rflags: u64,
+    host_vmcb_pa: u64,
+}
+
+impl SvmWorldSwitchFrame {
+    fn new(host_vmcb_pa: u64) -> Self {
+        Self {
+            guest_regs: GeneralRegisters::default(),
+            host_stack_top: 0,
+            host_rflags: 0,
+            host_vmcb_pa,
+        }
+    }
+}
+
+const _: () = {
+    assert!(size_of::<GeneralRegisters>() == 16 * size_of::<u64>());
+    assert!(offset_of!(SvmWorldSwitchFrame, guest_regs) == 0);
+    assert!(offset_of!(SvmWorldSwitchFrame, host_stack_top) == size_of::<GeneralRegisters>());
+    assert!(
+        offset_of!(SvmWorldSwitchFrame, host_rflags)
+            == size_of::<GeneralRegisters>() + size_of::<u64>()
+    );
+    assert!(
+        offset_of!(SvmWorldSwitchFrame, host_vmcb_pa)
+            == size_of::<GeneralRegisters>() + 2 * size_of::<u64>()
+    );
+};
+
+/// Switches from host state to an SVM guest and restores host state on exit.
+///
+/// # Safety
+///
+/// `frame` must point to a live [`SvmWorldSwitchFrame`], both VMCB physical
+/// addresses must remain valid for the entire call, SVM must be enabled on the
+/// current CPU, and GIF must be clear. Guest `VMLOAD` installs guest FS/GS, so
+/// this function must remain a single assembly window with no Rust call before
+/// the host `VMLOAD` completes.
+#[unsafe(naked)]
+unsafe extern "C" fn svm_world_switch(_frame: *mut SvmWorldSwitchFrame, _guest_vmcb_pa: u64) {
+    naked_asm!(
+        "pushfq",
+        "pop qword ptr [rdi + {host_rflags}]",
+        save_regs_no_rax!(),
+        "mov [rdi + {host_stack_top}], rsp",
+        "mov rax, rsi",
+        // Guest FS/GS becomes live here. Nothing may call or return to Rust
+        // until the second VMLOAD restores the host save area.
+        "vmload rax",
+        "sti",
+        "mov rsp, rdi",
+        restore_regs_no_rax!(),
+        "vmrun rax",
+        "cli",
+        "vmsave rax",
+        "mov rax, [rsp + {host_vmcb_from_guest_rsp}]",
+        "vmload rax",
+        save_regs_no_rax!(),
+        "mov rdi, rsp",
+        "mov rsp, [rdi + {host_stack_top}]",
+        restore_regs_no_rax!(),
+        "ret",
+        host_stack_top = const offset_of!(SvmWorldSwitchFrame, host_stack_top),
+        host_rflags = const offset_of!(SvmWorldSwitchFrame, host_rflags),
+        host_vmcb_from_guest_rsp = const offset_of!(SvmWorldSwitchFrame, host_vmcb_pa)
+            - size_of::<GeneralRegisters>(),
+    );
 }
 
 /// Host save area used to restore CPU state touched by SVM VMLOAD/VMSAVE.
@@ -155,16 +233,14 @@ impl<H: X86HostOps> VmLoadSaveStates<H> {
         })
     }
 
-    pub fn save(&mut self) {
+    fn save_host(&mut self) {
         unsafe {
             let _ = super::instructions::vmsave(self.vmcb.phys_addr().as_usize() as u64);
         }
     }
 
-    pub fn load(&self) {
-        unsafe {
-            let _ = super::instructions::vmload(self.vmcb.phys_addr().as_usize() as u64);
-        }
+    fn phys_addr(&self) -> u64 {
+        self.vmcb.phys_addr().as_usize() as u64
     }
 }
 
@@ -172,16 +248,8 @@ impl<H: X86HostOps> VmLoadSaveStates<H> {
 /// permission map.
 #[repr(C)]
 pub struct SvmVcpu<H: X86HostOps> {
-    // The order of `guest_regs`, `host_stack_top`, and `host_rflags` is
-    // mandatory. They must be the first three fields. If you want to change
-    // the order or the type of these fields, you must also change the assembly
-    // in this file.
-    /// Guest general-purpose registers.
-    guest_regs: GeneralRegisters,
-    // Used by `svm_run()` assembly; keep immediately after `guest_regs`.
-    host_stack_top: u64,
-    /// Host RFLAGS captured immediately before VM entry.
-    host_rflags: u64,
+    /// State owned by the no-Rust guest/host handoff.
+    world_switch: SvmWorldSwitchFrame,
 
     // The order of the following fields is not mandatory.
     /// Whether this VCPU has entered the guest at least once.
@@ -210,16 +278,15 @@ pub struct SvmVcpu<H: X86HostOps> {
 
 impl<H: X86HostOps> SvmVcpu<H> {
     fn create(vm_id: usize, vcpu_id: usize) -> X86VcpuResult<Self> {
+        let load_save_states = VmLoadSaveStates::<H>::new()?;
         let vcpu = Self {
-            guest_regs: GeneralRegisters::default(),
-            host_stack_top: 0,
-            host_rflags: 0,
+            world_switch: SvmWorldSwitchFrame::new(load_save_states.phys_addr()),
             launched: false,
             entry: None,
             npt_root: None,
             vmcb: VmcbFrame::<H>::new()?,
-            load_save_states: VmLoadSaveStates::<H>::new()?,
-            iopm: IOPm::<H>::passthrough_all()?,
+            load_save_states,
+            iopm: IOPm::<H>::guest_owned()?,
             msrpm: MSRPm::<H>::passthrough_all()?,
             pending_events: VecDeque::with_capacity(8),
             injecting_event: None,
@@ -234,7 +301,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
         &mut self,
         entry: X86GuestPhysAddr,
         npt_root: X86HostPhysAddr,
-        config: X86VCpuSetupConfig,
+        config: X86VcpuSetupConfig,
     ) -> X86VcpuResult {
         self.setup_io_bitmap(config)?;
         self.setup_msr_bitmap()?;
@@ -363,18 +430,14 @@ impl<H: X86HostOps> SvmVcpu<H> {
         Ok(())
     }
 
-    fn setup_io_bitmap(&mut self, config: X86VCpuSetupConfig) -> X86VcpuResult {
+    fn setup_io_bitmap(&mut self, config: X86VcpuSetupConfig) -> X86VcpuResult {
         // This port is part of the x86 QEMU test contract: 0x604 reports test completion.
         self.iopm
             .set_intercept_of_range(QEMU_EXIT_PORT as _, 2, true);
         self.iopm
             .set_intercept_of_range(X86_PIT_PORT_BASE as u32, X86_PIT_PORT_COUNT, true);
         self.iopm.set_intercept(X86_PIT_SPEAKER_PORT as u32, true);
-        if config.emulate_com1 {
-            self.iopm
-                .set_intercept_of_range(X86_COM1_PORT_BASE as u32, X86_COM1_PORT_COUNT, true);
-        }
-        for range in config.passthrough_port_ranges() {
+        for range in config.intercepted_port_ranges() {
             self.iopm
                 .set_intercept_of_range(range.base as u32, range.length as u32, true);
         }
@@ -435,11 +498,11 @@ impl<H: X86HostOps> SvmVcpu<H> {
     }
 
     pub fn regs(&self) -> &GeneralRegisters {
-        &self.guest_regs
+        &self.world_switch.guest_regs
     }
 
     pub fn regs_mut(&mut self) -> &mut GeneralRegisters {
-        &mut self.guest_regs
+        &mut self.world_switch.guest_regs
     }
 
     pub fn stack_pointer(&self) -> usize {
@@ -864,8 +927,9 @@ impl<H: X86HostOps> SvmVcpu<H> {
         const XCR_XCR0: u64 = 0;
         const VM_EXIT_INSTR_LEN_XSETBV: u8 = 3;
 
-        let index = self.guest_regs.rcx.get_bits(0..32);
-        let value = self.guest_regs.rdx.get_bits(0..32) << 32 | self.guest_regs.rax.get_bits(0..32);
+        let index = self.world_switch.guest_regs.rcx.get_bits(0..32);
+        let value = self.world_switch.guest_regs.rdx.get_bits(0..32) << 32
+            | self.world_switch.guest_regs.rax.get_bits(0..32);
 
         if index == XCR_XCR0 {
             Xcr0::from_bits(value)
@@ -909,7 +973,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
     fn svm_io_exit_info(
         &self,
         exit_info: &super::vmcb::SvmExitInfo,
-    ) -> X86VcpuResult<(bool, bool, bool, X86AccessWidth, X86Port)> {
+    ) -> X86VcpuResult<SvmIoExitInfo> {
         let info = exit_info.exit_info_1;
         // SVM packs IO direction, string/repeat attributes, width, and port
         // into EXITINFO1 for IOIO exits.
@@ -918,8 +982,130 @@ impl<H: X86HostOps> SvmVcpu<H> {
         let is_repeat = info.get_bit(3);
         let width = X86AccessWidth::try_from(info.get_bits(4..7) as usize)
             .map_err(|_| x86_err_type!(InvalidData, "invalid SVM IOIO access width"))?;
+        let address_size = if is_string {
+            Some(X86AddressSize::from_bytes(
+                info.get_bits(7..10) as usize * 2,
+            )?)
+        } else {
+            None
+        };
         let port = X86Port::new(info.get_bits(16..32) as u16);
-        Ok((is_in, is_string, is_repeat, width, port))
+        Ok(SvmIoExitInfo {
+            is_in,
+            is_string,
+            is_repeat,
+            width,
+            address_size,
+            segment: info.get_bits(10..13) as u8,
+            port,
+        })
+    }
+
+    fn handle_port_io_exit(
+        &mut self,
+        exit_info: &super::vmcb::SvmExitInfo,
+    ) -> X86VcpuResult<X86VmExit> {
+        let io = self.svm_io_exit_info(exit_info)?;
+        if !io.is_string {
+            self.set_rip(exit_info.exit_info_2);
+            return Ok(if io.is_in {
+                X86VmExit::PortIoRead {
+                    port: io.port,
+                    width: io.width,
+                }
+            } else {
+                X86VmExit::PortIoWrite {
+                    port: io.port,
+                    width: io.width,
+                    data: self.regs().rax.get_bits(io.width.bits_range()),
+                }
+            });
+        }
+
+        let address_size = io.address_size.ok_or(X86VcpuError::InvalidData)?;
+        if io.is_repeat && address_size.low(self.regs().rcx) == 0 {
+            self.set_rip(exit_info.exit_info_2);
+            return Ok(X86VmExit::Nothing);
+        }
+        let direction = if io.is_in {
+            X86PortIoDirection::In
+        } else {
+            X86PortIoDirection::Out
+        };
+        let index = match direction {
+            X86PortIoDirection::In => self.regs().rdi,
+            X86PortIoDirection::Out => self.regs().rsi,
+        };
+        let guest_linear = self.string_io_linear_address(io.segment, address_size, index)?;
+        let guest_paddr = self.translate_guest_linear(guest_linear)?;
+        let decrement = unsafe { self.vmcb.as_vmcb_ref().state.rflags.get() }
+            & RFlags::DIRECTION_FLAG.bits()
+            != 0;
+
+        Ok(X86VmExit::PortIoString(X86PortIoStringExit::new(
+            X86PortIoAccess {
+                port: io.port,
+                width: io.width,
+                direction,
+                guest_paddr,
+            },
+            X86PortIoIteration {
+                address_size,
+                index,
+                count: self.regs().rcx,
+                repeat: io.is_repeat,
+                decrement,
+                next_rip: exit_info.exit_info_2,
+            },
+        )))
+    }
+
+    fn string_io_linear_address(
+        &self,
+        segment: u8,
+        address_size: X86AddressSize,
+        index: u64,
+    ) -> X86VcpuResult<X86GuestVirtAddr> {
+        let state = unsafe { &self.vmcb.as_vmcb_ref().state };
+        let base = if self.get_cpu_mode() == VmCpuMode::Mode64 {
+            match segment {
+                4 => state.fs.base.get(),
+                5 => state.gs.base.get(),
+                _ => 0,
+            }
+        } else {
+            match segment {
+                0 => state.es.base.get(),
+                1 => state.cs.base.get(),
+                2 => state.ss.base.get(),
+                3 => state.ds.base.get(),
+                4 => state.fs.base.get(),
+                5 => state.gs.base.get(),
+                _ => return x86_err!(InvalidData, "invalid SVM string-I/O segment"),
+            }
+        };
+        let linear = base
+            .checked_add(address_size.low(index))
+            .ok_or(X86VcpuError::InvalidData)?;
+        usize::try_from(linear)
+            .map(X86GuestVirtAddr::from_usize)
+            .map_err(|_| X86VcpuError::InvalidData)
+    }
+
+    /// Commits one successfully emulated string-I/O element.
+    pub fn complete_port_io_string(&mut self, exit: X86PortIoStringExit) -> X86VcpuResult {
+        if exit.instruction_complete() {
+            self.set_rip(exit.next_rip());
+        }
+        let regs = self.regs_mut();
+        match exit.direction() {
+            X86PortIoDirection::In => regs.rdi = exit.updated_index(),
+            X86PortIoDirection::Out => regs.rsi = exit.updated_index(),
+        }
+        if let Some(count) = exit.updated_count() {
+            regs.rcx = count;
+        }
+        Ok(())
     }
 
     fn read_edx_eax(&self) -> u64 {
@@ -1052,7 +1238,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
     ) -> X86VcpuResult<Option<(X86VmExit, u8)>> {
         let addr_usize = addr.as_usize();
         let local_apic =
-            (X86_LOCAL_APIC_BASE..X86_LOCAL_APIC_BASE + X86_LOCAL_APIC_SIZE).contains(&addr_usize);
+            (X86_LOCAL_APIC_GPA..X86_LOCAL_APIC_GPA + X86_LOCAL_APIC_SIZE).contains(&addr_usize);
         let ioapic = (X86_IOAPIC_BASE..X86_IOAPIC_BASE + X86_IOAPIC_SIZE).contains(&addr_usize);
         if !local_apic && !ioapic {
             return Ok(None);
@@ -1079,7 +1265,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
             (_, opcode) if svm_mmio_register_write_opcode(write, opcode, local_apic) => {
                 let reg = ((modrm >> 3) & 0x7) | ((rex & 0x4) << 1);
                 let end = self.skip_modrm_memory_operand(rip, modrm, rex)?;
-                let data = self.guest_regs.get_reg_of_index(reg) as u32 as u64;
+                let data = self.world_switch.guest_regs.get_reg_of_index(reg) as u32 as u64;
                 let exit = self.handle_decoded_npt_mmio_write(addr, data, local_apic)?;
                 Ok(Some((exit, (end.as_usize() - start.as_usize()) as u8)))
             }
@@ -1141,7 +1327,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
             });
         }
 
-        let offset = addr.as_usize() - X86_LOCAL_APIC_BASE;
+        let offset = addr.as_usize() - X86_LOCAL_APIC_GPA;
         if offset == X86_LOCAL_APIC_EOI_OFFSET {
             return Ok(X86VmExit::InterruptEnd {
                 vector: self.handle_local_apic_eoi(),
@@ -1280,72 +1466,42 @@ impl<H: X86HostOps> SvmVcpu<H> {
         x86_err!(InvalidInput, "failed to translate guest RIP")
     }
 
-    fn before_vmrun(&mut self) {
+    fn prepare_world_switch(&mut self) {
         let rax = self.regs().rax;
         unsafe {
             super::instructions::clgi();
             self.vmcb.as_vmcb().state.rax.set(rax);
         }
-        self.load_save_states.save();
-        unsafe {
-            let _ = super::instructions::vmload(self.vmcb.phys_addr().as_usize() as u64);
-        }
-    }
-
-    fn after_vmrun(&mut self) {
-        unsafe {
-            let _ = super::instructions::vmsave(self.vmcb.phys_addr().as_usize() as u64);
-        }
-        self.load_save_states.load();
-        self.regs_mut().rax = unsafe { self.vmcb.as_vmcb().state.rax.get() };
-        unsafe {
-            super::instructions::stgi();
-        }
+        self.load_save_states.save_host();
     }
 
     /// Enter the guest once with AMD SVM `VMRUN`.
     ///
     /// # Safety
     ///
-    /// The caller must ensure SVM is enabled on the current CPU, the VMCB and
-    /// nested page table referenced by this vCPU are valid, and host state is
-    /// restored after the VM exit before returning to normal Rust execution.
+    /// The caller must ensure SVM is enabled, this vCPU remains bound to the
+    /// non-migrating current CPU, and its VMCB and nested page table are valid.
+    /// This method restores host VMLOAD/VMSAVE state before it returns.
     pub unsafe fn svm_run(&mut self) {
-        let self_addr = self as *mut Self as u64;
-        let vmcb = self.vmcb.phys_addr().as_usize() as u64;
+        let guest_vmcb_pa = self.vmcb.phys_addr().as_usize() as u64;
 
         self.load_guest_xstate();
-        self.before_vmrun();
+        self.prepare_world_switch();
 
-        // Keep the register save/restore sequence adjacent to VMRUN; Rust calls
-        // in this window may clobber the guest registers prepared for entry.
-        // SVM samples host RFLAGS.IF at VMRUN, while GIF remains closed until
-        // after the host state has been restored from the exit path.
+        // SAFETY: `prepare_world_switch` saved the host VMLOAD/VMSAVE state,
+        // CLGI keeps host interrupts from entering the no-Rust window, and
+        // the exclusive borrow keeps the frame and both VMCBs live for the call.
         unsafe {
-            asm!(
-                "pushfq", // save host RFLAGS, including IF
-                "pop qword ptr [rdi + {host_rflags}]",
-                "sti",
-                save_regs_no_rax!(),
-                "mov [rdi + {host_stack_top}], rsp",
-                "mov rsp, rdi",
-                restore_regs_no_rax!(),
-                "vmrun rax",
-                "cli", // keep host IRQs off until host xstate is restored
-                save_regs_no_rax!(),
-                "mov rdi, rsp",
-                "mov rsp, [rdi + {host_stack_top}]",
-                restore_regs_no_rax!(),
-                host_stack_top = const size_of::<GeneralRegisters>(),
-                host_rflags = const size_of::<GeneralRegisters>() + size_of::<u64>(),
-                in("rax") vmcb,
-                in("rdi") self_addr,
-            );
+            svm_world_switch(&mut self.world_switch, guest_vmcb_pa);
         }
 
-        self.after_vmrun();
+        self.regs_mut().rax = unsafe { self.vmcb.as_vmcb().state.rax.get() };
+        // Keep guest XCR0/XSS from becoming observable by a host interrupt.
         self.load_host_xstate();
-        restore_host_interrupt_flag(self.host_rflags);
+        unsafe {
+            super::instructions::stgi();
+        }
+        restore_host_interrupt_flag(self.world_switch.host_rflags);
     }
 }
 
@@ -1466,7 +1622,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
     pub fn new_with_config(
         vm_id: usize,
         vcpu_id: usize,
-        _config: X86VCpuCreateConfig,
+        _config: X86VcpuCreateConfig,
     ) -> X86VcpuResult<Self> {
         Self::create(vm_id, vcpu_id)
     }
@@ -1481,7 +1637,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
         Ok(())
     }
 
-    pub fn setup(&mut self, config: X86VCpuSetupConfig) -> X86VcpuResult {
+    pub fn setup(&mut self, config: X86VcpuSetupConfig) -> X86VcpuResult {
         let entry = self
             .entry
             .ok_or(x86_err_type!(InvalidInput, "SVM guest entry is not set"))?;
@@ -1528,26 +1684,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
                     self.handle_rdtsc()?;
                     X86VmExit::PreemptionTimer
                 }
-                SvmExitCode::IOIO => {
-                    let (is_in, is_string, is_repeat, width, port) =
-                        self.svm_io_exit_info(&exit_info)?;
-                    // IOIO exits provide the decoded next RIP in EXITINFO2.
-                    self.set_rip(exit_info.exit_info_2);
-
-                    if is_string || is_repeat {
-                        warn!("SVM unsupported IOIO exit: {exit_info:#x?}");
-                        warn!("VCpu {self:#x?}");
-                        X86VmExit::Halt
-                    } else if is_in {
-                        X86VmExit::PortIoRead { port, width }
-                    } else {
-                        X86VmExit::PortIoWrite {
-                            port,
-                            width,
-                            data: self.regs().rax.get_bits(width.bits_range()),
-                        }
-                    }
-                }
+                SvmExitCode::IOIO => self.handle_port_io_exit(&exit_info)?,
                 SvmExitCode::MSR => {
                     let msr = self.regs().rcx as u32;
                     if (X2APIC_MSR_BASE..=X2APIC_MSR_END).contains(&msr) {

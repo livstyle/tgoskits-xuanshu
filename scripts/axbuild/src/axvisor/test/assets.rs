@@ -14,6 +14,8 @@ use crate::{
 
 const ARCEOS_QEMU_GUEST_PACKAGE: &str = "ax-helloworld";
 const ARCEOS_QEMU_GUEST_KERNEL_PATH: &str = "/guest/arceos/ax-helloworld-x86_64.bin";
+const ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE: &str = "qemu-aarch64";
+const ARCEOS_AARCH64_SMOKE_GUEST_KERNEL: &str = "arceos/arceos-qemu";
 
 pub(super) fn arceos_x86_64_guest_request() -> anyhow::Result<ResolvedBuildRequest> {
     let target = "x86_64-unknown-none".to_string();
@@ -46,45 +48,26 @@ pub(super) fn arceos_x86_64_guest_bin_path(workspace_root: &Path) -> PathBuf {
     arceos_x86_64_guest_elf_path(workspace_root, false).with_extension("bin")
 }
 
-const ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE: &str = "qemu-aarch64";
-const ARCEOS_AARCH64_SMOKE_GUEST_KERNEL: &str = "arceos/arceos-qemu";
-
-pub(super) fn arceos_aarch64_smoke_guest_image_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(format!(
-        "os/axvisor/images/{ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE}/{ARCEOS_AARCH64_SMOKE_GUEST_KERNEL}"
-    ))
-}
-
-pub(super) fn vmconfigs_need_arceos_aarch64_smoke_guest(
-    request: &ResolvedAxvisorRequest,
-    vmconfigs: &[PathBuf],
-) -> bool {
+pub(super) fn vmconfigs_need_arceos_aarch64_smoke_guest(request: &ResolvedAxvisorRequest) -> bool {
     request.arch == "aarch64"
-        && vmconfigs.iter().any(|path| {
-            path.to_string_lossy().contains("arceos-rt-smp1-smoke")
-                || path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.contains("arceos-rt-smp1-smoke"))
+        && request.vmconfigs.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("arceos-rt-smp1-smoke"))
         })
 }
 
 pub(super) fn ensure_arceos_aarch64_smoke_guest_image(workspace_root: &Path) -> anyhow::Result<()> {
-    let image_path = arceos_aarch64_smoke_guest_image_path(workspace_root);
+    let image_path = workspace_root.join(format!(
+        "os/axvisor/images/{ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE}/{ARCEOS_AARCH64_SMOKE_GUEST_KERNEL}"
+    ));
     if image_path.is_file() {
         return Ok(());
     }
 
-    if let Some(parent) = image_path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create ArceOS smoke guest image directory {}",
-                parent.display()
-            )
-        })?;
-    }
-
     let output_dir = workspace_root.join("os/axvisor/images");
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
     let status = Command::new("cargo")
         .args([
             "xtask",
@@ -101,8 +84,7 @@ pub(super) fn ensure_arceos_aarch64_smoke_guest_image(workspace_root: &Path) -> 
         anyhow::bail!("`cargo xtask image pull {ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE}` failed");
     }
 
-    ensure_file_exists(&image_path, "ArceOS smoke guest image")?;
-    Ok(())
+    ensure_file_exists(&image_path, "ArceOS smoke guest image")
 }
 
 pub(super) fn inject_arceos_x86_64_guest_image(
@@ -139,6 +121,7 @@ pub(super) fn inject_arceos_x86_64_guest_image(
         temporary_overlay_run_dir = Some(layout.run_dir);
         layout.overlay_dir
     };
+
     copy_guest_overlay_file(
         &guest_image,
         &overlay_dir,

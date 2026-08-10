@@ -7,7 +7,9 @@ use std::{
 
 use tempfile::tempdir;
 
-use super::{app_qemu_test_case, load_qemu_app_case_fields, resolve_qemu_config};
+use super::{
+    app_qemu_test_case, load_qemu_app_case_fields, prepare_qemu_app_case, resolve_qemu_config,
+};
 use crate::{
     starry::app::{
         StarryAppQemuCase, discover_apps,
@@ -37,6 +39,28 @@ fn qemu_config_selection_prefers_exact_arch_config() {
         .unwrap();
 
     assert_eq!(selected, exact);
+}
+
+#[tokio::test]
+async fn qemu_case_uses_starry_default_arch_without_an_arch_argument() {
+    let root = tempdir().unwrap();
+    write_case_file(
+        root.path(),
+        "qemu/apt",
+        "qemu-riscv64.toml",
+        "args = []\nuefi = false\nto_bin = true\nsuccess_regex = []\nfail_regex = []\n",
+    );
+    let app = discover_apps(root.path())
+        .unwrap()
+        .into_iter()
+        .find(|app| app.name == "qemu/apt")
+        .unwrap();
+
+    let case = prepare_qemu_app_case(root.path(), &app, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(case.arch, crate::context::DEFAULT_STARRY_ARCH);
 }
 
 #[test]
@@ -193,6 +217,156 @@ fail_regex = []
         load_qemu_app_case_fields(root.path(), &app, qemu_config.as_deref().unwrap()).unwrap();
 
     assert!(!fields.snapshot);
+}
+
+#[test]
+fn selfhost_x86_app_preserves_the_persistent_build_contract() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("axbuild manifest should live under scripts/axbuild")
+        .to_path_buf();
+    let app_dir = repo.join("apps/starry/selfhost/selfhost-full-kernel");
+    let config_path = app_dir.join("qemu-x86_64.toml");
+    let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+
+    assert_eq!(
+        config.get("snapshot").and_then(toml::Value::as_bool),
+        Some(false),
+        "{} must persist the guest-built kernel",
+        config_path.display()
+    );
+    assert_eq!(
+        config.get("shell_init_cmd").and_then(toml::Value::as_str),
+        Some("/bin/sh /opt/starry-selfhost-run.sh"),
+        "{} must use the staged non-interactive guest runner",
+        config_path.display()
+    );
+    let qemu_args = config
+        .get("args")
+        .and_then(toml::Value::as_array)
+        .expect("selfhost qemu args must be an array");
+    let qemu_args = qemu_args
+        .iter()
+        .map(|arg| arg.as_str().expect("QEMU arguments must be strings"))
+        .collect::<Vec<_>>();
+    assert!(
+        qemu_args.contains(&"-no-shutdown")
+            && qemu_args.windows(2).any(|args| args == ["-smp", "4"])
+            && qemu_args.windows(2).any(|args| args == ["-m", "16G"])
+            && qemu_args
+                .windows(2)
+                .any(|args| args == ["-netdev", "user,id=net0"])
+            && qemu_args
+                .windows(2)
+                .any(|args| args == ["-device", "virtio-net-pci,netdev=net0"]),
+        "{} must wait for an explicit success or failure marker before QEMU exits",
+        config_path.display()
+    );
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("rootfs-x86_64-selfhost.img"),
+        "{} must select a managed per-app rootfs",
+        config_path.display()
+    );
+
+    let prebuild_path = app_dir.join("prebuild.sh");
+    let prebuild = fs::read_to_string(&prebuild_path).unwrap();
+    assert!(
+        prebuild.contains("tgoskits-src.tar")
+            && prebuild.contains("starry-selfhost-run.sh")
+            && prebuild.contains("starry-selfhost-reboot-guard.sh")
+            && prebuild.contains("cargo xtask image resize")
+            && prebuild.contains("SELFHOST_ROOTFS_SIZE_MIB:-32768")
+            && prebuild.contains("stage_guest_resolver")
+            && prebuild.contains("/run/systemd/resolve/resolv.conf")
+            && prebuild.contains("sha256sum --check --status")
+            && prebuild.contains("--prefix=\"$toolchain_dir\"")
+            && prebuild.contains(".starry-selfhost-toolchain-version"),
+        "{} must stage source, the guest runner, the reboot guard, and a usable resolver into a \
+         32 GiB rootfs, and must install verified Rust components into a versioned toolchain \
+         archive",
+        prebuild_path.display()
+    );
+
+    let guest_runner_path = app_dir.join("guest-selfbuild.sh");
+    let guest_runner = fs::read_to_string(&guest_runner_path).unwrap();
+    assert!(
+        guest_runner.contains("x86_64-unknown-linux-musl")
+            && guest_runner.contains("TOOLCHAIN=\"nightly-2026-07-15\"")
+            && guest_runner.contains("RUSTUP_TOOLCHAIN=\"starry-selfhost-")
+            && guest_runner.contains("--default-toolchain none")
+            && guest_runner.contains("export RUSTUP_TOOLCHAIN")
+            && guest_runner.contains("rustc -vV")
+            && guest_runner.contains("cargo-binutils --version 0.4.0 --locked")
+            && guest_runner.contains("ksym --version 0.6.0 --locked")
+            && guest_runner.contains("tg-xtask")
+            && guest_runner.contains("SELF_COMPILE_SUCCESS")
+            && !guest_runner.contains("SELFHOST_RUST_TOOLCHAIN")
+            && !guest_runner.contains("x86_64-unknown-linux-gnu")
+            && !guest_runner.contains("export CARGO_TARGET_DIR")
+            && guest_runner.contains("SELFHOST_TARGET_DIR:-/opt/starry-selfhost-target")
+            && guest_runner.contains("ln -s \"$TARGET_DIR\" \"$SOURCE_DIR/target\"")
+            && guest_runner.contains("SELFHOST_CARGO_BUILD_JOBS:-2")
+            && guest_runner
+                .contains("$SOURCE_DIR/target/x86_64-unknown-linux-musl/release/starryos"),
+        "{} must build the canonical x86_64 path with a native musl host toolchain",
+        guest_runner_path.display()
+    );
+}
+
+#[test]
+fn selfhost_reboot_guard_reports_the_interrupted_phase() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("axbuild manifest should live under scripts/axbuild")
+        .to_path_buf();
+    let guard =
+        repo.join("apps/starry/selfhost/selfhost-full-kernel/guest-selfbuild-reboot-guard.sh");
+    let root = tempdir().unwrap();
+    let state = root.path().join("state");
+    let bin_dir = root.path().join("bin");
+    let poweroff = bin_dir.join("poweroff");
+    let poweroff_marker = root.path().join("poweroff-called");
+    fs::create_dir(&bin_dir).unwrap();
+    fs::write(
+        &poweroff,
+        "#!/bin/sh\nprintf 'called\\n' >\"$POWER_OFF_MARKER\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&poweroff, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(&state, "running test-run kernel\n").unwrap();
+
+    let output = Command::new("/bin/sh")
+        .arg(&guard)
+        .env("SELFHOST_STATE_FILE", &state)
+        .env("POWER_OFF_MARKER", &poweroff_marker)
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("SELF_COMPILE_FAILED: unexpected guest reboot during kernel")
+    );
+    assert_eq!(fs::read_to_string(&poweroff_marker).unwrap(), "called\n");
+
+    fs::write(&state, "ready test-run prebuild\n").unwrap();
+    fs::remove_file(&poweroff_marker).unwrap();
+    let output = Command::new("/bin/sh")
+        .arg(&guard)
+        .env("SELFHOST_STATE_FILE", &state)
+        .env("POWER_OFF_MARKER", &poweroff_marker)
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("SELF_COMPILE_FAILED"));
+    assert!(!poweroff_marker.exists());
 }
 
 #[test]
@@ -391,6 +565,82 @@ fn syscall_count_qemu_configs_stop_after_pass_marker() {
 }
 
 #[test]
+fn loongarch64_nvme_rootfs_build_keeps_serial_console() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("axbuild manifest should live under scripts/axbuild")
+        .to_path_buf();
+    let config_path =
+        repo.join("apps/starry/qemu/nvme/build-loongarch64-unknown-none-softfloat.toml");
+    let content = fs::read_to_string(&config_path).unwrap();
+    let config: toml::Value = toml::from_str(&content).unwrap();
+    let features = config
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .expect("NVMe build config must declare features");
+
+    assert!(
+        features
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .any(|feature| feature == "ax-driver/serial"),
+        "{} must keep the LoongArch serial console enabled so NVMe test markers are observable",
+        config_path.display()
+    );
+}
+
+#[test]
+fn loongarch64_nvme_rootfs_uses_dynamic_uefi_handoff() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("axbuild manifest should live under scripts/axbuild")
+        .to_path_buf();
+    let config_path = repo.join("apps/starry/qemu/nvme/nvme-rootfs-rw-20m/qemu-loongarch64.toml");
+    let content = fs::read_to_string(&config_path).unwrap();
+    let config: toml::Value = toml::from_str(&content).unwrap();
+
+    assert_eq!(
+        config.get("uefi").and_then(toml::Value::as_bool),
+        Some(true),
+        "{} must boot the PIC kernel through the supported LoongArch dynamic UEFI handoff",
+        config_path.display()
+    );
+    assert_eq!(
+        config.get("to_bin").and_then(toml::Value::as_bool),
+        Some(true),
+        "{} must retain the UEFI runner's explicit BIN artifact contract",
+        config_path.display()
+    );
+}
+
+#[test]
+fn x86_64_nvme_rootfs_uses_dynamic_uefi_handoff() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("axbuild manifest should live under scripts/axbuild")
+        .to_path_buf();
+    let config_path = repo.join("apps/starry/qemu/nvme/nvme-rootfs-rw-20m/qemu-x86_64.toml");
+    let content = fs::read_to_string(&config_path).unwrap();
+    let config: toml::Value = toml::from_str(&content).unwrap();
+
+    assert_eq!(
+        config.get("uefi").and_then(toml::Value::as_bool),
+        Some(true),
+        "{} must boot the PIC kernel through the supported x86_64 dynamic UEFI handoff",
+        config_path.display()
+    );
+    assert_eq!(
+        config.get("to_bin").and_then(toml::Value::as_bool),
+        Some(true),
+        "{} must retain the UEFI runner's explicit BIN artifact contract",
+        config_path.display()
+    );
+}
+
+#[test]
 fn codex_cli_qemu_config_uses_injected_smoke_script() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -505,6 +755,116 @@ fn apk_package_prebuilds_use_guest_apk_from_staging_root() {
             prebuild_path.display()
         );
     }
+}
+
+#[test]
+fn nix_qemu_configs_use_dedicated_nvme_rootfs() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("axbuild manifest should live under scripts/axbuild")
+        .to_path_buf();
+    let app_dir = repo.join("apps/starry/nix");
+
+    for (config_name, arch) in [
+        ("qemu-x86_64.toml", "x86_64"),
+        ("qemu-x86_64-shell.toml", "x86_64"),
+        ("qemu-aarch64.toml", "aarch64"),
+    ] {
+        let config_path = app_dir.join(config_name);
+        let config = fs::read_to_string(&config_path).unwrap();
+
+        assert!(
+            config.contains(&format!("rootfs-{arch}-nix.img")),
+            "{} must use a Nix-specific managed rootfs so its 8 GiB resize cannot mutate the \
+             shared Alpine base image",
+            config_path.display()
+        );
+        assert!(
+            !config.contains(&format!("rootfs-{arch}-alpine.img")),
+            "{} must not pass the shared Alpine base image to the Nix prebuild",
+            config_path.display()
+        );
+        assert!(
+            config.contains("\"nvme,") && !config.contains("virtio-blk"),
+            "{} must attach its Starry root disk through the IRQ-driven NVMe path",
+            config_path.display()
+        );
+    }
+}
+
+#[test]
+fn nix_app_installs_nix_before_guest_boot() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("axbuild manifest should live under scripts/axbuild")
+        .to_path_buf();
+
+    let prebuild_path = repo.join("apps/starry/nix/prebuild.sh");
+    let prebuild = fs::read_to_string(&prebuild_path).unwrap();
+    assert!(
+        prebuild.contains("/sbin/apk")
+            && prebuild.contains("--force-no-chroot")
+            && prebuild.contains("--scripts=no")
+            && prebuild.contains("add nix"),
+        "{} must install Alpine-packaged Nix into the app rootfs before boot",
+        prebuild_path.display()
+    );
+    assert!(
+        prebuild.contains("info --recursive --format json nix"),
+        "{} must copy the full Alpine Nix dependency closure, not only newly installed packages",
+        prebuild_path.display()
+    );
+    assert!(
+        prebuild.contains("relativize_staging_absolute_symlinks")
+            && prebuild.contains("realpath --relative-to="),
+        "{} must make staging-root absolute symlinks qemu-user safe before running guest apk",
+        prebuild_path.display()
+    );
+
+    let guest_script_path = repo.join("apps/starry/nix/test_nix.sh");
+    let guest_script = fs::read_to_string(&guest_script_path).unwrap();
+    assert!(
+        !guest_script.contains("apk add") && !guest_script.contains("apk update"),
+        "{} must not install Nix from the guest at QEMU runtime",
+        guest_script_path.display()
+    );
+    assert!(
+        guest_script.contains("command -v nix"),
+        "{} must still verify that the prebuilt Nix binary is present",
+        guest_script_path.display()
+    );
+
+    for script_name in ["nix-nosandbox.sh", "nix.sh", "nix-nixpkgs.sh"] {
+        let script_path = repo.join("apps/starry/nix").join(script_name);
+        let script = fs::read_to_string(&script_path).unwrap();
+        assert!(
+            script.contains("NIX_REMOTE=local"),
+            "{} must use the injected single-user store instead of the daemon socket",
+            script_path.display()
+        );
+    }
+}
+
+#[test]
+fn app_qemu_applies_shared_timeout_scale() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("axbuild manifest should live under scripts/axbuild")
+        .to_path_buf();
+    let source_path = repo.join("scripts/axbuild/src/starry/mod.rs");
+    let source = fs::read_to_string(&source_path).unwrap();
+
+    assert!(
+        source
+            .matches("qemu::apply_timeout_scale(&mut qemu);")
+            .count()
+            >= 2,
+        "{} must apply shared QEMU timeout scaling on both app qemu paths",
+        source_path.display()
+    );
 }
 
 #[test]

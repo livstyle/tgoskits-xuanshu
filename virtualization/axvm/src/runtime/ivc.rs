@@ -13,16 +13,17 @@
 // limitations under the License.
 
 //! Inter-VM communication (IVC) module.
-use alloc::{
+use std::{
     collections::{BTreeMap, btree_map::Entry},
     format,
+    sync::Mutex,
     vec::Vec,
 };
 
-use ax_errno::AxResult;
-use ax_kspin::SpinNoIrq as Mutex;
-
-use crate::{GuestPhysAddr, HostPhysAddr, host::PagingHandler};
+use crate::{
+    AxVmError, AxVmResult, GuestPhysAddr, HostPhysAddr, ax_err_type, host::PagingHandler,
+    sync::MutexExt,
+};
 
 /// A global btree map to store IVC channels,
 /// indexed by (publisher_vm_id, channel_key).
@@ -32,24 +33,24 @@ static IVC_CHANNELS: Mutex<BTreeMap<(usize, usize), HostIVCChannel>> = Mutex::ne
 
 pub const MAX_IVC_CHANNEL_SIZE: usize = 4096;
 
-pub fn insert_channel(publisher_vm_id: usize, channel: HostIVCChannel) -> AxResult<()> {
-    let mut channels = IVC_CHANNELS.lock();
+pub fn insert_channel(publisher_vm_id: usize, channel: HostIVCChannel) -> AxVmResult<()> {
+    let mut channels = IVC_CHANNELS.lock_unpoisoned();
     let channel_key = (publisher_vm_id, channel.key);
     match channels.entry(channel_key) {
         Entry::Vacant(entry) => {
             entry.insert(channel);
             Ok(())
         }
-        Entry::Occupied(_) => Err(ax_errno::ax_err_type!(
-            AlreadyExists,
-            "IVC channel already exists"
-        )),
+        Entry::Occupied(_) => Err(ax_err_type!(AlreadyExists, "IVC channel already exists")),
     }
 }
 
-pub fn ensure_channel_absent(publisher_vm_id: usize, key: usize) -> AxResult<()> {
-    if IVC_CHANNELS.lock().contains_key(&(publisher_vm_id, key)) {
-        Err(ax_errno::ax_err_type!(
+pub fn ensure_channel_absent(publisher_vm_id: usize, key: usize) -> AxVmResult<()> {
+    if IVC_CHANNELS
+        .lock_unpoisoned()
+        .contains_key(&(publisher_vm_id, key))
+    {
+        Err(ax_err_type!(
             AlreadyExists,
             format!(
                 "IVC channel for publisher VM {} with key {} already exists",
@@ -66,11 +67,11 @@ pub fn ensure_channel_absent(publisher_vm_id: usize, key: usize) -> AxResult<()>
 /// (by setting its base GPA to None).
 /// If the channel is successfully unpublished, it will return the base GPA and size of the channel.
 /// If the channel does not exist, it will return an error.
-pub fn unpublish_channel(publisher_vm_id: usize, key: usize) -> AxResult<(GuestPhysAddr, usize)> {
-    let mut channels = IVC_CHANNELS.lock();
+pub fn unpublish_channel(publisher_vm_id: usize, key: usize) -> AxVmResult<(GuestPhysAddr, usize)> {
+    let mut channels = IVC_CHANNELS.lock_unpoisoned();
     let channel_key = (publisher_vm_id, key);
     let channel = channels.get_mut(&channel_key).ok_or_else(|| {
-        ax_errno::ax_err_type!(
+        ax_err_type!(
             NotFound,
             format!(
                 "IVC channel for publisher VM {} with key {} not found",
@@ -79,7 +80,7 @@ pub fn unpublish_channel(publisher_vm_id: usize, key: usize) -> AxResult<(GuestP
         )
     })?;
     let base_gpa = channel.base_gpa_in_publisher().ok_or_else(|| {
-        ax_errno::ax_err_type!(
+        ax_err_type!(
             NotFound,
             format!(
                 "IVC channel for publisher VM {} with key {} has no base GPA, it may have been \
@@ -103,10 +104,10 @@ pub fn prepare_subscribe_channel(
     publisher_vm_id: usize,
     key: usize,
     subscriber_vm_id: usize,
-) -> AxResult<usize> {
-    let channels = IVC_CHANNELS.lock();
+) -> AxVmResult<usize> {
+    let channels = IVC_CHANNELS.lock_unpoisoned();
     let channel = channels.get(&(publisher_vm_id, key)).ok_or_else(|| {
-        ax_errno::ax_err_type!(
+        ax_err_type!(
             NotFound,
             format!(
                 "IVC channel for publisher VM {} with key {} not found",
@@ -116,7 +117,7 @@ pub fn prepare_subscribe_channel(
     })?;
 
     if channel.is_unpublished() {
-        return Err(ax_errno::ax_err_type!(
+        return Err(ax_err_type!(
             NotFound,
             format!(
                 "IVC channel for publisher VM {} with key {} has been unpublished",
@@ -125,7 +126,7 @@ pub fn prepare_subscribe_channel(
         ));
     }
     if channel.has_subscriber(subscriber_vm_id) {
-        return Err(ax_errno::ax_err_type!(
+        return Err(ax_err_type!(
             AlreadyExists,
             format!(
                 "VM[{}] has already subscribed to publisher VM[{}] Key {:#x}",
@@ -144,10 +145,10 @@ pub fn subscribe_to_channel_of_publisher(
     key: usize,
     subscriber_vm_id: usize,
     subscriber_gpa: GuestPhysAddr,
-) -> AxResult<(HostPhysAddr, usize)> {
-    let mut channels = IVC_CHANNELS.lock();
+) -> AxVmResult<(HostPhysAddr, usize)> {
+    let mut channels = IVC_CHANNELS.lock_unpoisoned();
     let channel = channels.get_mut(&(publisher_vm_id, key)).ok_or_else(|| {
-        ax_errno::ax_err_type!(
+        ax_err_type!(
             NotFound,
             format!(
                 "IVC channel for publisher VM [{}] key {:#x} not found",
@@ -156,7 +157,7 @@ pub fn subscribe_to_channel_of_publisher(
         )
     })?;
     if channel.is_unpublished() {
-        return Err(ax_errno::ax_err_type!(
+        return Err(ax_err_type!(
             NotFound,
             format!(
                 "IVC channel for publisher VM [{}] key {:#x} has been unpublished",
@@ -165,7 +166,7 @@ pub fn subscribe_to_channel_of_publisher(
         ));
     }
     if channel.has_subscriber(subscriber_vm_id) {
-        return Err(ax_errno::ax_err_type!(
+        return Err(ax_err_type!(
             AlreadyExists,
             format!(
                 "VM[{}] has already subscribed to publisher VM[{}] Key {:#x}",
@@ -185,14 +186,14 @@ pub fn unsubscribe_from_channel_of_publisher(
     publisher_vm_id: usize,
     key: usize,
     subscriber_vm_id: usize,
-) -> AxResult<(GuestPhysAddr, usize)> {
-    let mut channels = IVC_CHANNELS.lock();
+) -> AxVmResult<(GuestPhysAddr, usize)> {
+    let mut channels = IVC_CHANNELS.lock_unpoisoned();
     let (base_gpa, size) = if let Some(channel) = channels.get_mut(&(publisher_vm_id, key)) {
         // Remove the subscriber VM ID from the channel.
         if let Some(subscriber_gpa) = channel.remove_subscriber(subscriber_vm_id) {
             Ok((subscriber_gpa, channel.size()))
         } else {
-            Err(ax_errno::ax_err_type!(
+            Err(ax_err_type!(
                 NotFound,
                 format!(
                     "VM[{}] tries to unsubscribe non-existed channel publisher VM[{}] Key {:#x}",
@@ -201,7 +202,7 @@ pub fn unsubscribe_from_channel_of_publisher(
             ))
         }
     } else {
-        Err(ax_errno::ax_err_type!(
+        Err(ax_err_type!(
             NotFound,
             format!("IVC channel for publisher VM {} not found", publisher_vm_id)
         ))
@@ -231,7 +232,7 @@ pub struct IVCChannel<H: PagingHandler> {
     /// The base address of the shared memory region in guest physical address of the publisher VM.
     /// `None` if the channel has been unpublished (but still has subscribers).
     base_gpa: Option<GuestPhysAddr>,
-    _phantom: core::marker::PhantomData<H>,
+    _phantom: std::marker::PhantomData<H>,
 }
 
 #[repr(C)]
@@ -275,13 +276,13 @@ impl<H: PagingHandler> IVCChannel<H> {
             // Return a pointer to the data region, which starts after the header.
             H::phys_to_virt(self.shared_region_base)
                 .as_mut_ptr()
-                .add(core::mem::size_of::<IVCChannelHeader>())
+                .add(std::mem::size_of::<IVCChannelHeader>())
         }
     }
 }
 
-impl<H: PagingHandler> core::fmt::Debug for IVCChannel<H> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl<H: PagingHandler> std::fmt::Debug for IVCChannel<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "IVCChannel(publisher[{}], subscribers {:?}, base: {:?}, size: {:#x}, gpa: {:?})",
@@ -311,7 +312,7 @@ impl<H: PagingHandler> IVCChannel<H> {
         key: usize,
         shared_region_size: usize,
         base_gpa: GuestPhysAddr,
-    ) -> AxResult<Self> {
+    ) -> AxVmResult<Self> {
         // TODO: support larger shared region sizes with alloc_frames API.
         if shared_region_size > MAX_IVC_CHANNEL_SIZE {
             warn!(
@@ -320,8 +321,8 @@ impl<H: PagingHandler> IVCChannel<H> {
             );
         }
         let shared_region_size = shared_region_size.min(MAX_IVC_CHANNEL_SIZE);
-        let shared_region_base = H::alloc_frame().ok_or_else(|| {
-            ax_errno::ax_err_type!(NoMemory, "Failed to allocate shared region frame")
+        let shared_region_base = H::alloc_frame().ok_or(AxVmError::OutOfMemory {
+            operation: "allocate IVC shared region frame",
         })?;
 
         let mut channel = IVCChannel {
@@ -331,7 +332,7 @@ impl<H: PagingHandler> IVCChannel<H> {
             shared_region_base,
             shared_region_size,
             base_gpa: Some(base_gpa),
-            _phantom: core::marker::PhantomData,
+            _phantom: std::marker::PhantomData,
         };
 
         {

@@ -1,7 +1,6 @@
 features = [
     "ax-driver/virtio-blk",
     "fs",
-    "task1-baseline-slow-vtimer",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"

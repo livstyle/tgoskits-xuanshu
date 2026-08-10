@@ -16,11 +16,8 @@ use core::{
 use ax_errno::{AxError, AxResult, LinuxError};
 use ax_fs_ng::vfs::FileFlags;
 use ax_kspin::SpinRwLock as RwLock;
-use ax_memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
-use ax_runtime::hal::{
-    paging::{MappingFlags, PageSize},
-    time::wall_time,
-};
+use ax_memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange, align_up_4k};
+use ax_runtime::hal::{paging::MappingFlags, time::wall_time};
 use ax_sync::Mutex;
 use ax_task::{
     WaitQueue,
@@ -284,11 +281,11 @@ fn allocate_aio_ring(aspace: &mut AddrSpace, ring_size: usize) -> AxResult<VirtA
             aspace.base(),
             ring_size,
             VirtAddrRange::new(aspace.base(), aspace.end()),
-            PageSize::Size4K as usize,
+            PAGE_SIZE_4K,
         )
         .ok_or(AxError::NoMemory)?;
 
-    let backend = Backend::new_alloc(ring_vaddr, PageSize::Size4K, "aio_ring");
+    let backend = Backend::new_alloc(ring_vaddr, PAGE_SIZE_4K, "aio_ring");
     let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
     aspace.map(ring_vaddr, ring_size, flags, true, backend)?;
     Ok(ring_vaddr)
@@ -1496,4 +1493,56 @@ pub fn sys_io_cancel(
             .wake(IoEvents::IN | IoEvents::ERR | IoEvents::HUP)
     };
     Ok(0)
+}
+
+#[cfg(axtest)]
+pub(crate) fn aio_iocb_validation_rules_hold_for_test() -> bool {
+    // validate_iocb_common: rejects non-zero reserved2 and invalid flags.
+    let valid_iocb = Iocb {
+        data: 0,
+        key: 0,
+        rw_flags: 0,
+        lio_opcode: IOCB_CMD_PREAD,
+        reqprio: 0,
+        fildes: 0,
+        buf: 0,
+        nbytes: 0,
+        offset: 0,
+        reserved2: 0,
+        flags: 0,
+        resfd: 0,
+    };
+
+    // Valid iocb passes validation.
+    validate_iocb_common(&valid_iocb).is_ok()
+        // Non-zero reserved2 is rejected.
+        && {
+            let mut bad = valid_iocb;
+            bad.reserved2 = 1;
+            validate_iocb_common(&bad).is_err()
+        }
+        // Invalid flags (bit outside RESFD|IOPRIO) are rejected.
+        && {
+            let mut bad = valid_iocb;
+            bad.flags = 0xFFFF;
+            validate_iocb_common(&bad).is_err()
+        }
+        // Only IOCB_FLAG_RESFD is accepted.
+        && {
+            let mut ok = valid_iocb;
+            ok.flags = IOCB_FLAG_RESFD;
+            validate_iocb_common(&ok).is_ok()
+        }
+        // Only IOCB_FLAG_IOPRIO is accepted.
+        && {
+            let mut ok = valid_iocb;
+            ok.flags = IOCB_FLAG_IOPRIO;
+            validate_iocb_common(&ok).is_ok()
+        }
+        // Both flags together are accepted.
+        && {
+            let mut ok = valid_iocb;
+            ok.flags = IOCB_FLAG_RESFD | IOCB_FLAG_IOPRIO;
+            validate_iocb_common(&ok).is_ok()
+        }
 }

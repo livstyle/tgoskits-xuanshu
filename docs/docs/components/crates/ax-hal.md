@@ -23,20 +23,20 @@
 - `src/dummy.rs`：无真实平台时的占位实现。通过 `axplat` 接口提供 no-op 或 `unimplemented!()` 行为，主要用于宿主侧测试构建。
 - `src/dtb.rs`：管理 boot argument、FDT 解析与 `chosen.bootargs` 读取，负责把启动参数从引导阶段传给后续模块。
 - `src/mem.rs`：整合链接符号、平台物理内存范围和 MMIO 区域，生成统一的 `memory_regions()` 视图，并负责 `.bss` 清零。
-- `src/percpu.rs`：每 CPU 局部状态入口，维护当前任务指针并复用 `ax_plat::percpu` 提供的 CPU 本地能力。
+- `src/percpu.rs`：每 CPU 局部状态入口，通过 `cpu-local` 的类型化 header 读取当前线程，并复用 `ax_plat::percpu` 提供的 CPU 本地能力。
 - `src/time.rs`：时间相关能力的再导出层，把时钟源、计时器和时间转换统一暴露给上层。
 - `src/irq.rs`：IRQ 处理桥接层，负责 trap handler 注册、IRQ hook、与 `ax_plat::irq` 的派发对接。
-- `src/paging.rs`：页表处理桥接层，向 `ax-page-table-multiarch` 提供 `PagingHandlerImpl`，并在不同 ISA 下导出统一的页表类型。
+- `src/paging.rs`：页表处理桥接层，向 `page-table-generic` 提供 `PagingAllocator`，并用 `ax-cpu::paging::ArchPagingMeta` 导出统一的运行时页表类型。
 - `src/tls.rs`：内核态 TLS 布局与 `TlsArea` 管理，仅在 `tls` feature 启用时进入构建。
 - `build.rs` + `linker.lds.S`：生成选中平台 crate 的导入代码、SMP build info，并配合链接路径完成内核段布局。
 
 ### 1.3 关键数据结构与全局对象
 - `BOOTARG`：保存引导阶段传入的参数，后续由 DTB/FDT 解析流程读取。
 - `ALL_MEM_REGIONS`：统一后的物理内存区域视图，是 `ax-alloc`、`ax-runtime` 等模块做内存初始化的基础。
-- `CURRENT_TASK_PTR`：每 CPU 当前任务指针，供调度与上下文切换路径读取。
+- `CurrentThreadHeader`：由 `cpu-local` 统一定义的当前线程发布头；调度切换通过 CPU 区域前缀发布，不再维护第二份 per-CPU 任务指针。
 - `IRQ_HOOK`：可注册的 IRQ 钩子，用于平台 IRQ 分发前后的附加处理。
 - `CPU_NUM`：在 `smp` 场景下，由平台运行时发现结果决定最终可用 CPU 数。
-- `PagingHandlerImpl`：把页表帧申请/释放与地址翻译能力接到上层页表实现中。
+- `PagingAllocator`：把页表帧申请/释放与地址翻译能力接到通用页表执行器中；架构 PTE 和 TLB 语义由 `ax-cpu` 提供。
 - `TlsArea`：内核态线程局部存储块管理对象，仅在 TLS 打开时参与主线。
 
 ### 1.4 启动与初始化主线
@@ -81,7 +81,7 @@ flowchart TD
 - 提供统一的内存视图：`memory_regions()`、`kernel_aspace()`、`.bss` 清零等。
 - 提供统一的 trap/IRQ 桥接：`register_trap_handler`、IRQ 派发与 IRQ hook。
 - 提供统一的时间与计时器接口：`monotonic_time()`、`wall_time()`、one-shot timer 等由 `time` 子模块统一导出。
-- 提供统一的每 CPU 与上下文接口：`TaskContext`、`TrapFrame`、当前 CPU ID、当前任务指针等。
+- 提供统一的每 CPU 与上下文接口：`TaskContext`、`TrapFrame`、当前 CPU ID，以及 pin 约束下的当前线程 header 等。
 - 提供页表与 TLS 支撑：在打开 `paging` 或 `tls` 时，为 `ax-mm`、`ax-task`、用户态支持等提供底层能力。
 
 ### 使用场景
@@ -148,7 +148,7 @@ ax-hal = { workspace = true }
 ### 4.3 开发建议
 - 修改 `mem.rs` 时，要同步检查 `ax-alloc`、`ax-mm`、链接脚本与平台物理内存描述是否仍然一致。
 - 修改 `irq.rs` 时，要同步验证 `ax_runtime::init_interrupt()`、时钟中断注册以及上层调度器 tick 路径。
-- 修改 `paging.rs` 时，要同步检查 `ax-mm`、用户态地址空间和虚拟化场景是否仍然满足接口契约。
+- 修改 `paging.rs` 时，要同步检查 `ax-cpu::paging`、`page-table-generic`、`ax-mm` 和用户态地址空间是否仍然满足接口契约；stage-2 虚拟化格式继续由对应虚拟化组件拥有。
 - 修改 `build.rs` 或 `linker.lds.S` 时，要把这类改动视为“系统启动级变更”，不能只靠单模块验证。
 
 ## 测试

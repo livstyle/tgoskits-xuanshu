@@ -15,12 +15,14 @@ use super::{Starry, board};
 pub type StarryBuildInfo = crate::build::BuildInfo;
 pub use crate::build::LogLevel;
 use crate::{
+    build::BareKernelLinkMode,
     context::{ResolvedStarryRequest, STARRY_PACKAGE, starry_arch_for_target_checked},
     support::process::ProcessExt,
 };
 
-pub(crate) fn default_starry_build_info_for_target(target: &str) -> StarryBuildInfo {
-    let _ = target;
+pub(crate) fn default_starry_build_info() -> StarryBuildInfo {
+    // The package and board configuration own feature selection; a generated
+    // default must remain an empty capability set.
     StarryBuildInfo {
         features: Vec::new(),
         ..StarryBuildInfo::default()
@@ -73,9 +75,7 @@ pub(crate) fn load_build_info(request: &ResolvedStarryRequest) -> anyhow::Result
     let mut build_info = if let Some(build_info) = &request.build_info_override {
         build_info.clone()
     } else {
-        crate::build::ensure_build_info(&request.build_info_path, || {
-            default_starry_build_info_for_target(&request.target)
-        })?;
+        crate::build::ensure_build_info(&request.build_info_path, default_starry_build_info)?;
         crate::build::load_toml_with_rejector(
             &request.build_info_path,
             "build info",
@@ -83,7 +83,7 @@ pub(crate) fn load_build_info(request: &ResolvedStarryRequest) -> anyhow::Result
         )?
     };
 
-    crate::build::apply_makefile_features(&mut build_info, &request.package, &makefile_features);
+    crate::build::apply_makefile_features(&mut build_info, &makefile_features)?;
 
     if let Some(smp) = request.smp {
         build_info.max_cpu_num = Some(smp);
@@ -99,40 +99,34 @@ pub(crate) fn load_cargo_config(request: &ResolvedStarryRequest) -> anyhow::Resu
     let mut build_info = if let Some(build_info) = &request.build_info_override {
         build_info.clone()
     } else {
-        crate::build::ensure_build_info(&request.build_info_path, || {
-            default_starry_build_info_for_target(&request.target)
-        })?;
+        crate::build::ensure_build_info(&request.build_info_path, default_starry_build_info)?;
         crate::build::load_toml_with_rejector(
             &request.build_info_path,
             "build info",
             crate::build::reject_arceos_app_c_field,
         )?
     };
-    crate::build::apply_makefile_features_with_metadata(
-        &mut build_info,
-        &request.package,
-        &makefile_features,
-        metadata,
-    );
-    normalize_starry_platform_features(&mut build_info.features);
+    crate::build::apply_makefile_features(&mut build_info, &makefile_features)?;
+    enable_starry_smp_capability(&mut build_info.features);
+    build_info.features.sort();
+    build_info.features.dedup();
     if let Some(smp) = request.smp {
         build_info.max_cpu_num = Some(smp);
     }
-    let mut cargo = build_info.into_prepared_base_cargo_config_with_metadata(
+    let mut cargo = build_info.into_prepared_no_std_cargo_config_with_metadata(
         &request.package,
         &request.target,
         metadata,
+        BareKernelLinkMode::Pie,
     )?;
-    cargo
-        .features
-        .retain(|feature| !is_removed_dynamic_platform_feature(feature));
     patch_starry_cargo_config(&mut cargo, request, metadata)?;
     Ok(cargo)
 }
 
-fn normalize_starry_platform_features(features: &mut Vec<String>) {
-    features.sort();
-    features.dedup();
+fn enable_starry_smp_capability(features: &mut Vec<String>) {
+    // Starry always compiles the SMP kernel paths. `SMP` limits the CPUs exposed
+    // at runtime; board configurations may intentionally leave that limit unset.
+    features.push("smp".to_string());
 }
 
 fn patch_starry_cargo_config(
@@ -143,10 +137,6 @@ fn patch_starry_cargo_config(
     cargo.package = request.package.clone();
     ensure_starry_bin_arg(&mut cargo.args, &request.package, metadata)?;
     apply_starry_bin_override(cargo)?;
-    cargo
-        .features
-        .retain(|feature| !is_removed_dynamic_platform_feature(feature));
-
     cargo
         .env
         .insert("AX_ARCH".to_string(), request.arch.clone());
@@ -551,13 +541,6 @@ fn temp_file_path(path: &Path, suffix: &str) -> anyhow::Result<PathBuf> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("invalid path filename: {}", path.display()))?;
     Ok(parent.join(format!(".{name}.{suffix}.{}.tmp", std::process::id())))
-}
-
-fn is_removed_dynamic_platform_feature(feature: &str) -> bool {
-    matches!(
-        feature,
-        "plat-dyn" | "ax-std/plat-dyn" | "starry-kernel/plat-dyn" | "ax-hal/plat-dyn"
-    )
 }
 
 fn apply_starry_bin_override(cargo: &mut Cargo) -> anyhow::Result<()> {

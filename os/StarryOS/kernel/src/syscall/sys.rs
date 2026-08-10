@@ -2,7 +2,6 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use core::{ffi::c_char, mem::MaybeUninit};
 
 use ax_errno::{AxError, AxResult, LinuxError};
-use ax_fs_ng::vfs::FS_CONTEXT;
 use ax_sync::Mutex;
 use ax_task::current;
 use linux_raw_sys::{
@@ -176,13 +175,20 @@ fn dumpable_should_reset(old: &crate::task::Cred, new: &crate::task::Cred) -> bo
     old.euid != new.euid || old.egid != new.egid || old.fsuid != new.fsuid || old.fsgid != new.fsgid
 }
 
-fn commit_cred_with_id_rules(
-    thread: &crate::task::Thread,
-    old: &crate::task::Cred,
-    mut new: crate::task::Cred,
-) {
-    new.apply_id_change_capability_rules(old);
-    thread.set_cred(new);
+fn commit_cred_with_id_rules(thread: &crate::task::Thread, new: crate::task::Cred) {
+    thread.update_process_creds(|old| {
+        let mut target = old.clone();
+        target.uid = new.uid;
+        target.gid = new.gid;
+        target.euid = new.euid;
+        target.egid = new.egid;
+        target.suid = new.suid;
+        target.sgid = new.sgid;
+        target.fsuid = new.fsuid;
+        target.fsgid = new.fsgid;
+        target.apply_id_change_capability_rules(old);
+        target
+    });
 }
 
 fn user_ns_overflow_uid() -> u32 {
@@ -317,7 +323,7 @@ pub fn sys_setresuid(ruid: u32, euid: u32, suid: u32) -> AxResult<isize> {
     // fsuid always tracks euid.
     new.fsuid = new.euid;
     let reset_dumpable = dumpable_should_reset(&old, &new);
-    commit_cred_with_id_rules(thread, &old, new);
+    commit_cred_with_id_rules(thread, new);
     if reset_dumpable {
         thread.proc_data.set_dumpable(0);
     }
@@ -365,7 +371,7 @@ pub fn sys_setresgid(rgid: u32, egid: u32, sgid: u32) -> AxResult<isize> {
 
     new.fsgid = new.egid;
     let reset_dumpable = dumpable_should_reset(&old, &new);
-    commit_cred_with_id_rules(thread, &old, new);
+    commit_cred_with_id_rules(thread, new);
     if reset_dumpable {
         thread.proc_data.set_dumpable(0);
     }
@@ -401,7 +407,7 @@ pub fn sys_setuid(uid: u32) -> AxResult<isize> {
 
     new.fsuid = new.euid;
     let reset_dumpable = dumpable_should_reset(&old, &new);
-    commit_cred_with_id_rules(thread, &old, new);
+    commit_cred_with_id_rules(thread, new);
     if reset_dumpable {
         thread.proc_data.set_dumpable(0);
     }
@@ -432,7 +438,7 @@ pub fn sys_setgid(gid: u32) -> AxResult<isize> {
 
     new.fsgid = new.egid;
     let reset_dumpable = dumpable_should_reset(&old, &new);
-    commit_cred_with_id_rules(thread, &old, new);
+    commit_cred_with_id_rules(thread, new);
     if reset_dumpable {
         thread.proc_data.set_dumpable(0);
     }
@@ -482,7 +488,7 @@ pub fn sys_setreuid(ruid: u32, euid: u32) -> AxResult<isize> {
 
     new.fsuid = new.euid;
     let reset_dumpable = dumpable_should_reset(&old, &new);
-    commit_cred_with_id_rules(thread, &old, new);
+    commit_cred_with_id_rules(thread, new);
     if reset_dumpable {
         thread.proc_data.set_dumpable(0);
     }
@@ -524,7 +530,7 @@ pub fn sys_setregid(rgid: u32, egid: u32) -> AxResult<isize> {
 
     new.fsgid = new.egid;
     let reset_dumpable = dumpable_should_reset(&old, &new);
-    commit_cred_with_id_rules(thread, &old, new);
+    commit_cred_with_id_rules(thread, new);
     if reset_dumpable {
         thread.proc_data.set_dumpable(0);
     }
@@ -568,7 +574,7 @@ pub fn sys_setfsuid(fsuid: u32) -> AxResult<isize> {
         let mut new = (*old).clone();
         new.fsuid = fsuid;
         let reset_dumpable = dumpable_should_reset(&old, &new);
-        commit_cred_with_id_rules(thread, &old, new);
+        commit_cred_with_id_rules(thread, new);
         if reset_dumpable {
             thread.proc_data.set_dumpable(0);
         }
@@ -598,7 +604,7 @@ pub fn sys_setfsgid(fsgid: u32) -> AxResult<isize> {
         let mut new = (*old).clone();
         new.fsgid = fsgid;
         let reset_dumpable = dumpable_should_reset(&old, &new);
-        commit_cred_with_id_rules(thread, &old, new);
+        commit_cred_with_id_rules(thread, new);
         if reset_dumpable {
             thread.proc_data.set_dumpable(0);
         }
@@ -653,9 +659,12 @@ pub fn sys_setgroups(size: usize, list: *const u32) -> AxResult<isize> {
         Vec::new()
     };
 
-    let mut new = (*old).clone();
-    new.groups = Arc::from(groups.into_boxed_slice());
-    commit_cred_with_id_rules(thread, &old, new);
+    let groups: Arc<[u32]> = Arc::from(groups.into_boxed_slice());
+    thread.update_process_creds(|old| {
+        let mut new = old.clone();
+        new.groups = groups.clone();
+        new
+    });
     Ok(0)
 }
 
@@ -749,11 +758,20 @@ fn require_syslog_privilege() -> AxResult<()> {
     }
 }
 
+fn validate_syslog_read_args(buf: *mut c_char, len: usize) -> AxResult<()> {
+    if buf.is_null() || len > i32::MAX as usize {
+        Err(AxError::InvalidInput)
+    } else {
+        Ok(())
+    }
+}
+
 pub fn sys_syslog(ty: i32, buf: *mut c_char, len: usize) -> AxResult<isize> {
     match ty {
         SYSLOG_ACTION_CLOSE | SYSLOG_ACTION_OPEN => Ok(0),
         SYSLOG_ACTION_READ => {
             require_syslog_privilege()?;
+            validate_syslog_read_args(buf, len)?;
             let data = {
                 let mut state = SYSLOG_STATE.lock();
                 state.read(len)
@@ -765,6 +783,7 @@ pub fn sys_syslog(ty: i32, buf: *mut c_char, len: usize) -> AxResult<isize> {
         }
         SYSLOG_ACTION_READ_ALL => {
             require_syslog_privilege()?;
+            validate_syslog_read_args(buf, len)?;
             let data = {
                 let state = SYSLOG_STATE.lock();
                 state.read_all(len)
@@ -776,6 +795,7 @@ pub fn sys_syslog(ty: i32, buf: *mut c_char, len: usize) -> AxResult<isize> {
         }
         SYSLOG_ACTION_READ_CLEAR => {
             require_syslog_privilege()?;
+            validate_syslog_read_args(buf, len)?;
             let data = {
                 let mut state = SYSLOG_STATE.lock();
                 let data = state.read_all(len);
@@ -854,7 +874,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> AxResult<isize> {
         "/dev/urandom"
     };
 
-    let f = FS_CONTEXT.lock().resolve(path)?;
+    let f = ax_fs_ng::vfs::current_fs_context().lock().resolve(path)?;
     let mut kbuf = vec![0; len];
     let len = f.entry().as_file()?.read_at(&mut kbuf, 0)?;
 
@@ -942,7 +962,12 @@ pub fn sys_seccomp(op: u32, flags: u32, args: *const ()) -> AxResult<isize> {
                 sync_seccomp_to_thread_group();
             }
         }
-        SECCOMP_GET_ACTION_AVAIL => return seccomp_action_available(args),
+        SECCOMP_GET_ACTION_AVAIL => {
+            if flags != 0 {
+                return Err(AxError::InvalidInput);
+            }
+            return seccomp_action_available(args);
+        }
         _ => return Err(AxError::InvalidInput),
     }
 
@@ -1006,4 +1031,55 @@ pub fn sys_riscv_hwprobe(
     }
 
     Ok(0)
+}
+
+#[cfg(axtest)]
+pub(crate) fn uid_valid_and_syslog_validation_rules_hold_for_test() -> bool {
+    // uid_valid: NOCHG (u32::MAX) is invalid, everything else is valid.
+    uid_valid(0)
+        && uid_valid(1)
+        && uid_valid(1000)
+        && uid_valid(u32::MAX - 1)
+        && !uid_valid(u32::MAX)  // NOCHG is invalid
+
+    // validate_syslog_read_args: null buf or len > i32::MAX is invalid.
+    && validate_syslog_read_args(core::ptr::null_mut(), 0).is_err()
+    && validate_syslog_read_args(core::ptr::null_mut::<c_char>(), 100).is_err()
+    && validate_syslog_read_args(0x1 as *mut c_char, 0).is_ok()  // non-null, len=0 is ok
+    && {
+        let mut dummy: c_char = 0;
+        let ptr: *mut c_char = &mut dummy;
+        validate_syslog_read_args(ptr, i32::MAX as usize).is_ok()
+        && validate_syslog_read_args(ptr, (i32::MAX as usize) + 1).is_err()
+    }
+}
+
+#[cfg(axtest)]
+pub(crate) fn sys_constants_and_validation_rules_hold_for_test() -> bool {
+    use linux_raw_sys::general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM};
+
+    // Test NOCHG sentinel value
+    assert!(NOCHG == u32::MAX);
+
+    // Test getrandom flags
+    let valid_flags = 0u32;
+    assert!(valid_flags & !(GRND_NONBLOCK as u32 | GRND_INSECURE as u32 | GRND_RANDOM as u32) == 0);
+
+    let nonblock_only = GRND_NONBLOCK as u32;
+    assert!(
+        nonblock_only & !(GRND_NONBLOCK as u32 | GRND_INSECURE as u32 | GRND_RANDOM as u32) == 0
+    );
+
+    // Test seccomp constants
+    assert!(SECCOMP_SET_MODE_STRICT == 0);
+    assert!(SECCOMP_SET_MODE_FILTER == 1);
+    assert!(SECCOMP_GET_ACTION_AVAIL == 2);
+
+    // Test seccomp filter flags
+    assert!(SECCOMP_ALLOWED_FLAGS & SECCOMP_FILTER_FLAG_TSYNC != 0);
+    assert!(SECCOMP_ALLOWED_FLAGS & SECCOMP_FILTER_FLAG_LOG != 0);
+    assert!(SECCOMP_ALLOWED_FLAGS & SECCOMP_FILTER_FLAG_SPEC_ALLOW != 0);
+    assert!(SECCOMP_ALLOWED_FLAGS & SECCOMP_FILTER_FLAG_TSYNC_ESRCH != 0);
+
+    true
 }

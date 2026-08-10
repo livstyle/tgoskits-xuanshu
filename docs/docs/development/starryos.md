@@ -12,7 +12,7 @@ StarryOS 是构建在 ArceOS 模块层之上的 Linux 兼容操作系统。本�
 
 ### 1.1 工具链
 
-StarryOS 共享 TGOSKits 工作区的统一工具链（`nightly-2026-04-27`），无需额外配置。详见 [ArceOS 开发指南 → 开发环境](/docs/development/arceos#1-开发环境)。
+StarryOS 共享 TGOSKits 工作区的统一工具链（`nightly-2026-07-15`），无需额外配置。详见 [ArceOS 开发指南 → 开发环境](/docs/development/arceos#1-开发环境)。
 
 ### 1.2 QEMU
 
@@ -437,7 +437,7 @@ env = {AX_IP = "10.0.2.15", AX_GW = "10.0.2.2"}
 features = [
   "ax-runtime/rtc",
   "ax-driver/serial",
-  "ax-driver/virtio-blk",
+  "ax-driver/nvme",
   "ax-driver/virtio-net",
 ]
 log = "Warn"

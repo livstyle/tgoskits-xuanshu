@@ -1,13 +1,15 @@
 use std::{
     collections::HashMap,
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
 };
 
 use anyhow::{Context, anyhow, bail};
 use cargo_metadata::Package;
-use clap::{Args, Subcommand};
-use ostool::{board::RunBoardOptions, build::config::Cargo, run::qemu::QemuConfig};
+use clap::{Args, Subcommand, ValueEnum};
+use ostool::{board::RunBoardOptions, build::config::Cargo, ovmf::Arch, run::qemu::QemuConfig};
 
 use crate::{
     axvisor,
@@ -27,6 +29,7 @@ const AXTEST_SUITE_OK: &str = "AXTEST_SUITE_OK";
 const AXTEST_SUITE_FAIL: &str = "AXTEST_SUITE_FAIL";
 const AXTEST_CASE_FAIL: &str = "AXTEST_CASE .* status=fail";
 const PANIC_FAIL: &str = "panicked at";
+const COVERAGE_IGNORED_SOURCE_REGEX: &str = r"[/\\](\.(cargo|rustup)|target)[/\\]";
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct ArgsKtest {
@@ -71,6 +74,20 @@ pub(crate) struct ArgsKtestQemu {
     /// Enable axtest coverage capture
     #[arg(long)]
     pub(crate) coverage: bool,
+
+    /// Generate coverage report in the selected format
+    #[arg(
+        long = "out-fmt",
+        value_enum,
+        value_name = "FMT",
+        requires = "coverage"
+    )]
+    pub(crate) out_fmt: Option<KtestCoverageOutFmt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum KtestCoverageOutFmt {
+    Html,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -191,9 +208,52 @@ async fn run_qemu(args: ArgsKtestQemu) -> anyhow::Result<()> {
             crate::rootfs::qemu::RootfsPatchMode::EnsureDiskBootNet,
         );
     }
-    crate::test::qemu::apply_dynamic_platform_qemu_boot(&mut qemu, &cargo);
+    patch_x86_64_uefi_kernel_loader(&mut qemu, &arch, output.elf_path()).await?;
     apply_axtest_qemu_markers(&mut qemu);
-    app.run_qemu_with_axtest_coverage(&cargo, qemu, None).await
+    app.run_qemu_with_axtest_coverage(&cargo, qemu, None)
+        .await?;
+    if let Some(out_fmt) = args.out_fmt {
+        generate_ktest_coverage_report(out_fmt, app.workspace_root(), &cargo, output.elf_path())?;
+    }
+    Ok(())
+}
+
+async fn patch_x86_64_uefi_kernel_loader(
+    qemu: &mut QemuConfig,
+    arch: &str,
+    elf_path: &Path,
+) -> anyhow::Result<()> {
+    if arch != "x86_64" || !qemu.uefi {
+        return Ok(());
+    }
+
+    let firmware = crate::support::ovmf::OvmfFirmware::fetch(Arch::X64).await?;
+    let vars = elf_path.with_extension("vars.fd");
+    fs::copy(firmware.vars(), &vars).with_context(|| {
+        format!(
+            "failed to copy OVMF vars from {} to {}",
+            firmware.vars().display(),
+            vars.display()
+        )
+    })?;
+    apply_x86_64_uefi_kernel_loader(qemu, firmware.code(), &vars);
+    Ok(())
+}
+
+fn apply_x86_64_uefi_kernel_loader(qemu: &mut QemuConfig, code: &Path, vars: &Path) {
+    // Keep ostool's BIN conversion and QEMU kernel loader while supplying
+    // the shared OVMF cache as explicit pflash drives.
+    qemu.uefi = false;
+    qemu.to_bin = true;
+    qemu.args.extend([
+        "-drive".to_string(),
+        format!(
+            "if=pflash,format=raw,unit=0,readonly=on,file={}",
+            code.display()
+        ),
+        "-drive".to_string(),
+        format!("if=pflash,format=raw,unit=1,file={}", vars.display()),
+    ]);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -407,6 +467,8 @@ fn prepare_ktest_cargo(cargo: &mut Cargo, target: &KtestTarget, coverage: bool) 
     cargo.test = Some(target.name.clone());
     remove_cargo_target_selector_args(&mut cargo.args);
     cargo.env.remove("AXBUILD_STARRY_BIN");
+    // `ktest` is an explicit command: the harness feature and the target's
+    // declared required features are the only additions made here.
     ensure_feature(cargo, AXTEST_FEATURE);
     for feature in &target.required_features {
         ensure_feature(cargo, feature);
@@ -418,6 +480,125 @@ fn prepare_ktest_cargo(cargo: &mut Cargo, target: &KtestTarget, coverage: bool) 
             .insert("AXTEST_COVERAGE".to_string(), "y".to_string());
         crate::support::axtest_coverage::prepare_cargo(cargo);
     }
+}
+
+fn generate_ktest_coverage_report(
+    out_fmt: KtestCoverageOutFmt,
+    workspace_root: &Path,
+    cargo: &Cargo,
+    elf_path: &Path,
+) -> anyhow::Result<()> {
+    match out_fmt {
+        KtestCoverageOutFmt::Html => generate_ktest_coverage_html(workspace_root, cargo, elf_path),
+    }
+}
+
+fn generate_ktest_coverage_html(
+    workspace_root: &Path,
+    cargo: &Cargo,
+    elf_path: &Path,
+) -> anyhow::Result<()> {
+    let paths = crate::support::axtest_coverage::AxtestCoveragePaths::new(
+        workspace_root,
+        &cargo.package,
+        &cargo.target,
+    )?;
+    let profraw_path = paths.profraw_path;
+    if !profraw_path.is_file() {
+        bail!(
+            "coverage profile was not found at {}; run ktest qemu with --coverage first",
+            profraw_path.display()
+        );
+    }
+    if !elf_path.is_file() {
+        bail!("coverage binary was not found at {}", elf_path.display());
+    }
+
+    let profdata_path = profraw_path.with_extension("profdata");
+    let stem = profraw_path
+        .file_stem()
+        .ok_or_else(|| anyhow!("invalid coverage profile path {}", profraw_path.display()))?
+        .to_string_lossy();
+    let html_dir = profraw_path.with_file_name(format!("{stem}-html"));
+    if html_dir.exists() {
+        fs::remove_dir_all(&html_dir)
+            .with_context(|| format!("failed to remove {}", html_dir.display()))?;
+    }
+
+    let llvm_profdata = find_llvm_tool("llvm-profdata");
+    let llvm_cov = find_llvm_tool("llvm-cov");
+    run_tool(
+        &llvm_profdata,
+        [
+            OsString::from("merge"),
+            OsString::from("-sparse"),
+            profraw_path.as_os_str().to_os_string(),
+            OsString::from("-o"),
+            profdata_path.as_os_str().to_os_string(),
+        ],
+    )
+    .with_context(|| format!("failed to create {}", profdata_path.display()))?;
+    run_tool(
+        &llvm_cov,
+        llvm_cov_html_args(elf_path, &profdata_path, &html_dir),
+    )
+    .with_context(|| {
+        format!(
+            "failed to create HTML coverage report in {}",
+            html_dir.display()
+        )
+    })?;
+
+    println!("  coverage profdata: {}", profdata_path.display());
+    println!("  coverage html: {}/index.html", html_dir.display());
+    Ok(())
+}
+
+fn llvm_cov_html_args(elf_path: &Path, profdata_path: &Path, html_dir: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("show"),
+        elf_path.as_os_str().to_os_string(),
+        OsString::from(format!("-instr-profile={}", profdata_path.display())),
+        OsString::from("-format=html"),
+        OsString::from(format!("-output-dir={}", html_dir.display())),
+        OsString::from(format!(
+            "-ignore-filename-regex={COVERAGE_IGNORED_SOURCE_REGEX}"
+        )),
+    ]
+}
+
+fn find_llvm_tool(tool: &str) -> PathBuf {
+    if let Ok(output) = ProcessCommand::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        && output.status.success()
+    {
+        let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let rustlib = Path::new(&sysroot).join("lib/rustlib");
+        if let Ok(entries) = fs::read_dir(rustlib) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join("bin").join(tool);
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    PathBuf::from(tool)
+}
+
+fn run_tool<I>(tool: &Path, args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let status = ProcessCommand::new(tool)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run {}", tool.display()))?;
+    if !status.success() {
+        bail!("{} failed with status {status}", tool.display());
+    }
+    Ok(())
 }
 
 fn ensure_feature(cargo: &mut Cargo, feature: &str) {

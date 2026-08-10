@@ -20,6 +20,7 @@ fn build_info_enables_backtrace_matches_env_flags() {
 fn build_info_defaults_to_empty_env() {
     let info = BuildInfo::default();
     assert!(info.env.is_empty());
+    assert!(info.features.is_empty());
 }
 
 #[test]
@@ -76,4 +77,24 @@ fn stack_protector_feature_detection_accepts_supported_surfaces() {
     assert!(!features_enable_stack_protector(&[
         "stack-guard-page".to_string()
     ]));
+}
+
+#[test]
+fn build_info_rejects_uspace_and_tls_register_modes_before_cargo() {
+    for features in [
+        vec!["uspace".to_string(), "tls".to_string()],
+        vec!["ax-std/uspace".to_string(), "ax-std/tls".to_string()],
+    ] {
+        let info = BuildInfo {
+            features,
+            ..BuildInfo::default()
+        };
+
+        let error = info.validate_features().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("incompatible CPU-local register")
+        );
+    }
 }

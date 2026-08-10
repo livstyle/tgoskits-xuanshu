@@ -4,7 +4,6 @@ features = [
     "sched-cfs",
     "sdmmc",
     "rockchip-soc",
-    "task1-rt-opt",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"

@@ -11,7 +11,7 @@ use core::{
 };
 
 use ax_errno::{AxError, AxResult};
-use ax_fs_ng::vfs::{FS_CONTEXT, FsContext, sync_all_cached_files};
+use ax_fs_ng::vfs::{FsContext, sync_all_cached_files};
 use ax_runtime::hal::time::wall_time;
 use ax_task::current;
 use axfs_ng_vfs::{DeviceId, MetadataUpdate, NodePermission, NodeType, path::Path};
@@ -22,7 +22,7 @@ use linux_raw_sys::{
 use starry_vm::{VmPtr, vm_write_slice};
 
 use crate::{
-    file::{Directory, FD_TABLE, FileLike, fd_is_path, get_file_like, resolve_at, with_fs},
+    file::{Directory, FileLike, fd_is_path, get_file_like, resolve_at, with_fs},
     mm::{vm_load_path_string, vm_load_string},
     task::AsThread,
     time::TimeValueLike,
@@ -31,8 +31,22 @@ use crate::{
 /// `FIOCLEX` / `FIONCLEX`: set / clear the close-on-exec flag on a file descriptor
 /// via `ioctl` (the ioctl spelling of `fcntl(fd, F_SETFD, ...)`). libc/musl and CPython
 /// use these on freshly-opened fds; Linux implements them generically for any fd.
-const FIOCLEX: u32 = 0x5451;
-const FIONCLEX: u32 = 0x5450;
+pub const FIOCLEX: u32 = 0x5451;
+pub const FIONCLEX: u32 = 0x5450;
+
+#[cfg(axtest)]
+pub(crate) fn ctl_ioctl_constants_hold_for_test() -> bool {
+    // Verify ioctl command constants
+    assert!(FIOCLEX == 0x5451);
+    assert!(FIONCLEX == 0x5450);
+
+    // FIONBIO and FIOASYNC from linux_raw_sys
+    use linux_raw_sys::ioctl::{FIOASYNC, FIONBIO};
+    assert!(FIONBIO == 0x5421);
+    assert!(FIOASYNC == 0x5452);
+
+    true
+}
 
 fn path_info_at(dirfd: i32, path: &str) -> AxResult<(String, bool)> {
     with_fs(dirfd, |fs| {
@@ -61,7 +75,7 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> AxResult<isize> {
     // handle them here so any fd (not just ttys) accepts them, as Linux does. Without
     // this, curses/CPython (glances) hit "Unsupported ioctl command".
     if cmd == FIOCLEX || cmd == FIONCLEX {
-        FD_TABLE
+        crate::file::current_fd_table()
             .write()
             .get_mut(fd as _)
             .ok_or(AxError::BadFileDescriptor)?
@@ -87,9 +101,12 @@ pub fn sys_chdir(path: *const c_char) -> AxResult<isize> {
     let path = vm_load_path_string(path)?;
     debug_fn!("sys_chdir <= path: {path}");
 
-    let mut fs = FS_CONTEXT.lock();
+    let fs_context = ax_fs_ng::vfs::current_fs_context();
+    let mut fs = fs_context.lock();
     let entry = fs.resolve(path)?;
     fs.set_current_dir(entry)?;
+    let cwd = fs.current_dir().absolute_path()?.to_string();
+    *current().as_thread().proc_data.cwd_path.write() = cwd;
     Ok(0)
 }
 
@@ -97,7 +114,11 @@ pub fn sys_fchdir(dirfd: i32) -> AxResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
     let entry = with_fs(dirfd, |fs| Ok(fs.current_dir().clone()))?;
-    FS_CONTEXT.lock().set_current_dir(entry)?;
+    let fs_context = ax_fs_ng::vfs::current_fs_context();
+    let mut fs = fs_context.lock();
+    fs.set_current_dir(entry)?;
+    let cwd = fs.current_dir().absolute_path()?.to_string();
+    *current().as_thread().proc_data.cwd_path.write() = cwd;
     Ok(0)
 }
 
@@ -115,12 +136,18 @@ pub fn sys_chroot(path: *const c_char) -> AxResult<isize> {
     let path = vm_load_path_string(path)?;
     debug!("sys_chroot <= path: {path}");
 
-    let mut fs = FS_CONTEXT.lock();
+    let fs_context = ax_fs_ng::vfs::current_fs_context();
+    let mut fs = fs_context.lock();
     let loc = fs.resolve(path)?;
     if loc.node_type() != NodeType::Directory {
         return Err(AxError::NotADirectory);
     }
     *fs = FsContext::new(loc);
+    let root = fs.root_dir().absolute_path()?.to_string();
+    let cwd = fs.current_dir().absolute_path()?.to_string();
+    let proc_data = current().as_thread().proc_data.clone();
+    *proc_data.root_path.write() = root;
+    *proc_data.cwd_path.write() = cwd;
     Ok(0)
 }
 
@@ -418,7 +445,10 @@ pub fn sys_unlink(path: *const c_char) -> AxResult<isize> {
 pub fn sys_getcwd(buf: *mut u8, size: isize) -> AxResult<isize> {
     let size: usize = size.try_into().map_err(|_| AxError::BadAddress)?;
 
-    let cwd = FS_CONTEXT.lock().current_dir().absolute_path()?;
+    let cwd = ax_fs_ng::vfs::current_fs_context()
+        .lock()
+        .current_dir()
+        .absolute_path()?;
     debug!("sys_getcwd => cwd: {cwd}");
 
     let cwd = CString::new(cwd.as_str()).map_err(|_| AxError::InvalidInput)?;
@@ -450,6 +480,28 @@ pub fn sys_symlinkat(
     let uid = cred.fsuid;
     let gid = cred.fsgid;
     with_fs(new_dirfd, |fs| {
+        let (parent, name) = fs.resolve_parent(Path::new(&linkpath))?;
+        match parent.lookup_no_follow(&name) {
+            Ok(_) => return Err(AxError::AlreadyExists),
+            Err(AxError::NotFound) => {}
+            Err(err) => return Err(err),
+        }
+        let meta = parent.metadata()?;
+        if !cred.has_cap_dac_override() {
+            let can_create = if cred.fsuid == meta.uid {
+                meta.mode
+                    .contains(NodePermission::OWNER_WRITE | NodePermission::OWNER_EXEC)
+            } else if cred.in_group(meta.gid) {
+                meta.mode
+                    .contains(NodePermission::GROUP_WRITE | NodePermission::GROUP_EXEC)
+            } else {
+                meta.mode
+                    .contains(NodePermission::OTHER_WRITE | NodePermission::OTHER_EXEC)
+            };
+            if !can_create {
+                return Err(AxError::PermissionDenied);
+            }
+        }
         fs.symlink(target, linkpath, uid, gid)?;
         Ok(0)
     })
@@ -716,17 +768,20 @@ pub fn sys_utimensat(
         }
     }
 
-    let (atime, mtime) = if let Some(times) = times.nullable() {
+    let (atime, mtime, write_permission_suffices) = if let Some(times) = times.nullable() {
         // SAFETY: `timespec` is #[repr(C)] with only integer fields;
         // any bit pattern is a valid value.
         let [atime, mtime] = unsafe { times.vm_read_uninit()?.assume_init() };
+        let write_permission_suffices =
+            atime.tv_nsec == UTIME_NOW as _ && mtime.tv_nsec == UTIME_NOW as _;
         (
             utime_to_duration(&atime).transpose()?,
             utime_to_duration(&mtime).transpose()?,
+            write_permission_suffices,
         )
     } else {
         let time = wall_time();
-        (Some(time), Some(time))
+        (Some(time), Some(time), true)
     };
     if atime.is_none() && mtime.is_none() {
         return Ok(0);
@@ -742,7 +797,19 @@ pub fn sys_utimensat(
     if !cred.has_cap_fowner() {
         let meta = loc.metadata()?;
         if cred.fsuid != meta.uid {
-            return Err(AxError::OperationNotPermitted);
+            if !write_permission_suffices {
+                return Err(AxError::OperationNotPermitted);
+            }
+            let has_write = if cred.has_cap_dac_override() {
+                true
+            } else if cred.in_group(meta.gid) {
+                meta.mode.contains(NodePermission::GROUP_WRITE)
+            } else {
+                meta.mode.contains(NodePermission::OTHER_WRITE)
+            };
+            if !has_write {
+                return Err(AxError::PermissionDenied);
+            }
         }
     }
 
@@ -812,7 +879,10 @@ pub fn sys_sync() -> AxResult<isize> {
     // Only syncs root filesystem; does not iterate all mount points like Linux sync(2).
     // Write back ax-fs-ng page cache first, then flush filesystem metadata.
     sync_all_cached_files(false)?;
-    FS_CONTEXT.lock().root_dir().sync(false)?;
+    ax_fs_ng::vfs::current_fs_context()
+        .lock()
+        .root_dir()
+        .sync(false)?;
     Ok(0)
 }
 

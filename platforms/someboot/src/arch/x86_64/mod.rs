@@ -41,7 +41,7 @@ impl ArchTrait for Arch {
         Self::_va(paddr)
     }
 
-    fn _percpu(paddr: usize) -> *mut u8 {
+    fn cpu_area_phys_to_virt(paddr: usize) -> *mut u8 {
         (paddr + addrspace::PERCPU_BASE) as *mut u8
     }
 
@@ -172,6 +172,10 @@ impl ArchTrait for Arch {
 
     fn systimer_tick() -> usize {
         trap::ticks_now() as usize
+    }
+
+    fn systimer_stability() -> crate::timer::CounterStability {
+        trap::scheduler_counter_stability()
     }
 
     fn irq_all_is_enabled() -> bool {

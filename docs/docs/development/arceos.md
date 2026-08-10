@@ -16,7 +16,7 @@ TGOSKits 工作区根目录的 `rust-toolchain.toml` 已锁定统一工具链：
 
 | 配置项 | 值 |
 |--------|-----|
-| channel | `nightly-2026-04-27` |
+| channel | `nightly-2026-07-15` |
 | profile | `minimal` |
 | components | `rust-src`, `llvm-tools`, `rustfmt`, `clippy` |
 | targets | `x86_64-unknown-none`, `riscv64gc-unknown-none-elf`, `aarch64-unknown-none-softfloat`, `loongarch64-unknown-none-softfloat` |
@@ -61,7 +61,6 @@ os/arceos/
 │   ├── axsync/       # 同步原语
 │   ├── axmm/         # 页表/内存管理
 │   ├── axdisplay/    # 图形显示
-│   ├── axdma/        # DMA 支持
 │   ├── axinput/      # 输入设备
 │   ├── axipi/        # 核间中断
 │   ├── axruntime/    # 运行时初始化，调用 main()
@@ -240,7 +239,7 @@ sched-rr = ["ax-task/sched-rr", "irq"]
 sched-cfs = ["ax-task/sched-cfs", "irq"]
 
 # 上层协议栈
-fs = ["alloc", "paging", "ax-driver/virtio-blk", "dep:ax-fs", "ax-runtime/fs"]
+fs = ["alloc", "paging", "ax-driver/nvme", "dep:ax-fs", "ax-runtime/fs"]
 net = ["alloc", "paging", "ax-driver/virtio-net", "dep:ax-net", "ax-runtime/net"]
 ```
 
@@ -287,14 +286,12 @@ version = "0.1.0"
 edition.workspace = true
 
 [features]
-default = []
-arceos = ["dep:ax-std"]
+default = ["arceos"]
+arceos = ["dep:ax-std", "ax-std/arceos"]
 
 [dependencies]
 ax-std = { workspace = true, optional = true }
 
-[package.metadata.axstd]
-features = ["log-level-debug"]
 ```
 
 **3) `src/main.rs`**
@@ -547,7 +544,7 @@ GDB 连接：
 | `LOG` | `warn` | 日志级别 |
 | `SMP` | 平台默认 | CPU 数量 |
 | `FEATURES` | — | 额外 feature |
-| `BLK` | `n` | 启用 virtio-blk |
+| `BLK` | `n` | 启用 IRQ-driven NVMe 块设备 |
 | `NET` | `n` | 启用 virtio-net |
 | `BUS` | `pci` | `pci` 或 `mmio` |
 | `MEM` | `128M` | 内存大小 |
@@ -608,7 +605,7 @@ cargo xtask arceos qemu --package arceos-helloworld --arch riscv64  # SMP=4
 
 ### Q: 编译报 `linker 'rust-lld' not found`？
 
-确认工具链已正确安装：`rustup show` 应显示 `nightly-2026-04-27` 且包含 `rust-src` 组件。
+确认工具链已正确安装：`rustup show` 应显示 `nightly-2026-07-15` 且包含 `rust-src` 组件。
 
 ### Q: 网络/块设备示例启动失败？
 

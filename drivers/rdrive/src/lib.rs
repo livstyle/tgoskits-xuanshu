@@ -22,6 +22,9 @@ mod lock;
 mod manager;
 mod osal;
 
+#[cfg(all(axtest, feature = "axtest"))]
+pub mod axtest;
+
 pub mod probe;
 pub mod register;
 
@@ -43,6 +46,7 @@ pub enum Platform {
     Static,
     Fdt { addr: NonNull<u8> },
     Acpi(probe::acpi::AcpiRoot),
+    AcpiWithoutAml(probe::acpi::AcpiRoot),
 }
 
 unsafe impl Send for Platform {}
@@ -52,6 +56,7 @@ pub enum PlatformSource {
     Static,
     Fdt(NonNull<u8>),
     Acpi(probe::acpi::AcpiRoot),
+    AcpiWithoutAml(probe::acpi::AcpiRoot),
 }
 
 unsafe impl Send for PlatformSource {}
@@ -69,6 +74,7 @@ pub fn init(platform: Platform) -> Result<(), DriverError> {
         Platform::Static => init_sources(&[PlatformSource::Static])?,
         Platform::Fdt { addr } => init_sources(&[PlatformSource::Fdt(addr)])?,
         Platform::Acpi(root) => init_sources(&[PlatformSource::Acpi(root)])?,
+        Platform::AcpiWithoutAml(root) => init_sources(&[PlatformSource::AcpiWithoutAml(root)])?,
     }
     Ok(())
 }
@@ -78,7 +84,9 @@ pub fn init_sources(sources: &[PlatformSource]) -> Result<(), DriverError> {
         match source {
             PlatformSource::Static => {}
             PlatformSource::Fdt(addr) => probe::fdt::check_addr(*addr)?,
-            PlatformSource::Acpi(root) => probe::acpi::check_root(*root)?,
+            PlatformSource::Acpi(root) | PlatformSource::AcpiWithoutAml(root) => {
+                probe::acpi::check_root(*root)?
+            }
         }
     }
 
@@ -87,6 +95,7 @@ pub fn init_sources(sources: &[PlatformSource]) -> Result<(), DriverError> {
             PlatformSource::Static => probe::static_::init()?,
             PlatformSource::Fdt(addr) => probe::fdt::init(*addr)?,
             PlatformSource::Acpi(root) => probe::acpi::init(*root)?,
+            PlatformSource::AcpiWithoutAml(root) => probe::acpi::init_without_aml(*root)?,
         }
     }
 

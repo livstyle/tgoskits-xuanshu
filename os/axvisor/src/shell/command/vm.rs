@@ -20,6 +20,7 @@ use std::{
     vec::Vec,
 };
 
+use anyhow::Context;
 use axvm::{StopReason, VmStatus, VmVcpuState};
 #[cfg(feature = "fs")]
 use std::fs::read_to_string;
@@ -34,7 +35,6 @@ fn can_start_vm(status: VmStatus) -> Result<(), &'static str> {
         VmStatus::Running => Err("VM is already running"),
         VmStatus::Paused => Err("VM is suspended, use 'vm resume' instead"),
         VmStatus::Stopping => Err("VM is stopping, wait for it to fully stop"),
-        VmStatus::Uninit => Err("VM is still loading"),
         VmStatus::Pausing => Err("VM is pausing"),
         VmStatus::Destroying | VmStatus::Destroyed => Err("VM is being destroyed"),
         VmStatus::Failed => Err("VM is failed"),
@@ -54,7 +54,7 @@ fn can_stop_vm(status: VmStatus, force: bool) -> Result<(), &'static str> {
             }
         }
         VmStatus::Stopped => Err("VM is already stopped"),
-        VmStatus::Uninit | VmStatus::Ready => Ok(()), // Allow stopping VMs in these states
+        VmStatus::Ready => Ok(()), // Allow stopping VMs before their first start.
         VmStatus::Pausing => Err("VM is pausing"),
         VmStatus::Destroying | VmStatus::Destroyed => Err("VM is being destroyed"),
         VmStatus::Failed => Err("VM is failed"),
@@ -68,7 +68,6 @@ fn can_suspend_vm(status: VmStatus) -> Result<(), &'static str> {
         VmStatus::Paused => Err("VM is already suspended"),
         VmStatus::Stopped => Err("VM is stopped, cannot suspend"),
         VmStatus::Stopping => Err("VM is stopping, cannot suspend"),
-        VmStatus::Uninit => Err("VM is loading, cannot suspend"),
         VmStatus::Ready => Err("VM is not running, cannot suspend"),
         VmStatus::Pausing => Err("VM is already pausing"),
         VmStatus::Destroying | VmStatus::Destroyed => Err("VM is being destroyed"),
@@ -83,7 +82,6 @@ fn can_resume_vm(status: VmStatus) -> Result<(), &'static str> {
         VmStatus::Running => Err("VM is already running"),
         VmStatus::Stopped => Err("VM is stopped, use 'vm start' instead"),
         VmStatus::Stopping => Err("VM is stopping, cannot resume"),
-        VmStatus::Uninit => Err("VM is loading, cannot resume"),
         VmStatus::Ready => Err("VM is not started yet, use 'vm start' instead"),
         VmStatus::Pausing => Err("VM is pausing, wait before resuming"),
         VmStatus::Destroying | VmStatus::Destroyed => Err("VM is being destroyed"),
@@ -114,6 +112,7 @@ fn vm_help(_cmd: &ParsedCommand) {
     println!("Most commonly used vm commands:");
     println!("  create    Create a new virtual machine");
     println!("  start     Start a virtual machine");
+    println!("  console   Attach a running virtual machine console");
     println!("  stop      Stop a virtual machine");
     println!("  suspend   Suspend (pause) a running virtual machine");
     println!("  resume    Resume a suspended virtual machine");
@@ -156,11 +155,8 @@ fn vm_create(cmd: &ParsedCommand) {
                         vm_id, config_path
                     );
                 }
-                Err(_) => {
-                    println!(
-                        "✗ Failed to create VM from {}: Configuration error or panic occurred",
-                        config_path
-                    );
+                Err(error) => {
+                    println!("✗ Failed to create VM from {config_path}: {error:#}");
                 }
             },
             Err(e) => {
@@ -185,6 +181,17 @@ fn vm_create(cmd: &ParsedCommand) {
 fn vm_start(cmd: &ParsedCommand) {
     let args = &cmd.positional_args;
     let detach = cmd.flags.contains("detach");
+    let attach_console = cmd.flags.contains("console");
+
+    if detach && attach_console {
+        println!("Error: --detach and --console cannot be used together");
+        return;
+    }
+    if attach_console && args.len() != 1 {
+        println!("Error: --console requires exactly one VM_ID");
+        println!("Usage: vm start --console <VM_ID>");
+        return;
+    }
 
     if args.is_empty() {
         // start all VMs
@@ -205,7 +212,7 @@ fn vm_start(cmd: &ParsedCommand) {
             }
 
             if let Err(e) = start_single_vm(vm.clone()) {
-                println!("✗ VM[{}] failed to start: {:?}", vm.id(), e);
+                println!("✗ VM[{}] failed to start: {e:#}", vm.id());
             } else {
                 println!("✓ VM[{}] started successfully", vm.id());
                 started_count += 1;
@@ -217,7 +224,7 @@ fn vm_start(cmd: &ParsedCommand) {
         for vm_name in args {
             // Try to parse as VM ID or lookup VM name
             if let Ok(vm_id) = vm_name.parse::<usize>() {
-                start_vm_by_id(vm_id);
+                start_vm_by_id(vm_id, attach_console);
             } else {
                 println!("Error: VM name lookup not implemented. Use VM ID instead.");
                 println!("Available VMs:");
@@ -233,30 +240,32 @@ fn vm_start(cmd: &ParsedCommand) {
 
 /// Start a single VM by setting up vCPUs and calling boot.
 /// Returns Ok(()) if successful, Err otherwise.
-fn start_single_vm(vm: axvm::AxVMRef) -> Result<(), &'static str> {
+fn start_single_vm(vm: axvm::AxVMRef) -> anyhow::Result<()> {
     let vm_id = vm.id();
     let status = vm.status();
 
     // Validate state transition using helper function
-    can_start_vm(status)?;
-
-    match crate::manager::AxvmManager::start_vm(vm_id) {
-        Ok(_) => Ok(()),
-        Err(err) => {
-            // Revert status on failure
-            error!("Failed to boot VM[{}]: {:?}", vm_id, err);
-            Err("Failed to boot VM")
-        }
-    }
+    can_start_vm(status).map_err(anyhow::Error::msg)?;
+    crate::manager::AxvmManager::start_vm(vm_id).with_context(|| format!("boot VM[{vm_id}]"))?;
+    crate::guest_console::mark_running(vm_id);
+    Ok(())
 }
 
-fn start_vm_by_id(vm_id: usize) {
+fn start_vm_by_id(vm_id: usize, attach_console: bool) {
     match crate::manager::AxvmManager::with_vm(vm_id, |vm| start_single_vm(vm.clone())) {
         Some(Ok(_)) => {
             println!("✓ VM[{}] started successfully", vm_id);
+            if attach_console {
+                match crate::guest_console::attach(vm_id) {
+                    Ok(()) => println!(
+                        "✓ Attached VM[{vm_id}] console; use Ctrl+Alt+H to return to the shell"
+                    ),
+                    Err(error) => println!("✗ Failed to attach VM[{vm_id}] console: {error:#}"),
+                }
+            }
         }
         Some(Err(err)) => {
-            println!("✗ VM[{}] failed to start: {}", vm_id, err);
+            println!("✗ VM[{vm_id}] failed to start: {err:#}");
         }
         None => {
             println!("✗ VM[{}] not found", vm_id);
@@ -288,10 +297,7 @@ fn stop_vm_by_id(vm_id: usize, force: bool) {
         let status = vm.status();
 
         // Validate state transition using helper function
-        if let Err(err) = can_stop_vm(status, force) {
-            println!("⚠ VM[{}] {}", vm_id, err);
-            return Err(err);
-        }
+        can_stop_vm(status, force).map_err(anyhow::Error::msg)?;
 
         // Print appropriate message based on status
         match status {
@@ -305,7 +311,7 @@ fn stop_vm_by_id(vm_id: usize, force: bool) {
                     println!("Gracefully stopping VM[{}]...", vm_id);
                 }
             }
-            VmStatus::Uninit | VmStatus::Ready => {
+            VmStatus::Ready => {
                 println!(
                     "⚠ VM[{}] is in {:?} state, stopping anyway...",
                     vm_id, status
@@ -315,22 +321,18 @@ fn stop_vm_by_id(vm_id: usize, force: bool) {
         }
 
         // Call shutdown
-        match crate::manager::AxvmManager::stop_vm(vm_id) {
-            Ok(_) => Ok(()),
-            Err(_err) => {
-                // Revert status on failure
-                Err("Failed to shutdown VM")
-            }
-        }
+        crate::manager::AxvmManager::stop_vm(vm_id)
+            .with_context(|| format!("send shutdown request to VM[{vm_id}]"))
     }) {
         Some(Ok(_)) => {
+            crate::guest_console::mark_stopped(vm_id);
             println!("✓ VM[{}] stop signal sent successfully", vm_id);
             println!(
                 "  Note: vCPU threads will exit gracefully, VM status will transition to Stopped"
             );
         }
         Some(Err(err)) => {
-            println!("✗ Failed to stop VM[{}]: {:?}", vm_id, err);
+            println!("✗ Failed to stop VM[{vm_id}]: {err:#}");
         }
         None => {
             println!("✗ VM[{}] not found", vm_id);
@@ -360,17 +362,12 @@ fn vm_reset(cmd: &ParsedCommand) {
 fn reset_vm_by_id(vm_id: usize) {
     println!("Resetting VM[{}]...", vm_id);
     match crate::manager::AxvmManager::reset_vm(vm_id) {
-        Ok(()) => println!("✓ VM[{}] reset and started successfully", vm_id),
-        Err(err) => println!("✗ VM[{}] reset failed: {:?}", vm_id, err),
+        Ok(()) => {
+            crate::guest_console::mark_running(vm_id);
+            println!("✓ VM[{}] reset and started successfully", vm_id);
+        }
+        Err(err) => println!("✗ VM[{vm_id}] reset failed: {err:#}"),
     }
-}
-
-/// Compatibility alias for the old shell command name.
-fn vm_restart(cmd: &ParsedCommand) {
-    if cmd.flags.contains("force") {
-        println!("⚠ --force is ignored; reset always rebuilds runtime state");
-    }
-    vm_reset(cmd);
 }
 
 /// Suspend a running VM (functionality incomplete)
@@ -395,13 +392,13 @@ fn vm_suspend(cmd: &ParsedCommand) {
 fn suspend_vm_by_id(vm_id: usize) {
     println!("Suspending VM[{}]...", vm_id);
 
-    let result: Option<Result<(), &str>> = crate::manager::AxvmManager::with_vm(vm_id, |vm| {
+    let result: Option<anyhow::Result<()>> = crate::manager::AxvmManager::with_vm(vm_id, |vm| {
         let status = vm.status();
 
         // Check if VM can be suspended
-        can_suspend_vm(status)?;
+        can_suspend_vm(status).map_err(anyhow::Error::msg)?;
 
-        vm.pause().map_err(|_| "Failed to suspend VM")?;
+        vm.pause().with_context(|| format!("suspend VM[{vm_id}]"))?;
         info!("VM[{}] status set to Paused", vm_id);
 
         Ok(())
@@ -462,7 +459,7 @@ fn suspend_vm_by_id(vm_id: usize) {
             println!("  Use 'vm resume {}' to resume the VM", vm_id);
         }
         Some(Err(err)) => {
-            println!("✗ Failed to suspend VM[{}]: {}", vm_id, err);
+            println!("✗ Failed to suspend VM[{vm_id}]: {err:#}");
         }
         None => {
             println!("✗ VM[{}] not found", vm_id);
@@ -492,13 +489,14 @@ fn vm_resume(cmd: &ParsedCommand) {
 fn resume_vm_by_id(vm_id: usize) {
     println!("Resuming VM[{}]...", vm_id);
 
-    let result: Option<Result<(), &str>> = crate::manager::AxvmManager::with_vm(vm_id, |vm| {
+    let result: Option<anyhow::Result<()>> = crate::manager::AxvmManager::with_vm(vm_id, |vm| {
         let status = vm.status();
 
         // Check if VM can be resumed
-        can_resume_vm(status)?;
+        can_resume_vm(status).map_err(anyhow::Error::msg)?;
 
-        crate::manager::AxvmManager::resume_vm(vm_id).map_err(|_| "Failed to resume VM")?;
+        crate::manager::AxvmManager::resume_vm(vm_id)
+            .with_context(|| format!("resume suspended VM[{vm_id}]"))?;
 
         info!("VM[{}] resumed", vm_id);
         Ok(())
@@ -506,10 +504,11 @@ fn resume_vm_by_id(vm_id: usize) {
 
     match result {
         Some(Ok(_)) => {
+            crate::guest_console::mark_running(vm_id);
             println!("✓ VM[{}] resumed successfully", vm_id);
         }
         Some(Err(err)) => {
-            println!("✗ Failed to resume VM[{}]: {}", vm_id, err);
+            println!("✗ Failed to resume VM[{vm_id}]: {err:#}");
         }
         None => {
             println!("✗ VM[{}] not found", vm_id);
@@ -609,8 +608,9 @@ fn delete_vm_by_id(vm_id: usize, keep_data: bool) {
     // will only be fully destroyed when all vCPU threads exit and drop their references
     match crate::manager::AxvmManager::remove_vm(vm_id) {
         Some(vm) => {
+            crate::guest_console::remove(vm_id);
             if let Err(err) = vm.destroy() {
-                println!("⚠ VM[{}] destroy failed: {:?}", vm_id, err);
+                println!("⚠ VM[{vm_id}] destroy failed: {err}");
             }
             println!("✓ VM[{}] removed from VM list", vm_id);
 
@@ -634,6 +634,25 @@ fn delete_vm_by_id(vm_id: usize, keep_data: bool) {
     }
 
     println!("✓ VM[{}] deletion completed", vm_id);
+}
+
+fn vm_console(cmd: &ParsedCommand) {
+    let [vm_id] = cmd.positional_args.as_slice() else {
+        println!("Error: exactly one VM_ID is required");
+        println!("Usage: vm console <VM_ID>");
+        return;
+    };
+    let Ok(vm_id) = vm_id.parse::<usize>() else {
+        println!("Error: invalid VM ID: {vm_id}");
+        return;
+    };
+
+    match crate::guest_console::attach(vm_id) {
+        Ok(()) => {
+            println!("✓ Attached VM[{vm_id}] console; use Ctrl+Alt+H to return to the shell");
+        }
+        Err(error) => println!("✗ Failed to attach VM[{vm_id}] console: {error:#}"),
+    }
 }
 
 #[cfg(feature = "fs")]
@@ -725,6 +744,7 @@ fn vm_list(cmd: &ParsedCommand) {
                     VmVcpuState::Invalid => "Inv",
                     VmVcpuState::Created => "Cre",
                     VmVcpuState::Ready => "Rdy",
+                    VmVcpuState::Starting => "Sta",
                 };
                 *state_counts.entry(state).or_insert(0) += 1;
             }
@@ -828,6 +848,7 @@ fn show_vm_basic_details(vm_id: usize, show_config: bool, show_stats: bool) {
                 VmVcpuState::Invalid => "Invalid",
                 VmVcpuState::Created => "Created",
                 VmVcpuState::Ready => "Ready",
+                VmVcpuState::Starting => "Starting",
             };
             *state_counts.entry(state).or_insert(0) += 1;
         }
@@ -849,7 +870,7 @@ fn show_vm_basic_details(vm_id: usize, show_config: bool, show_stats: bool) {
             vm.with_config(|cfg| {
                 println!("  BSP Entry:      {:#x}", cfg.bsp_entry().as_usize());
                 println!("  AP Entry:       {:#x}", cfg.ap_entry().as_usize());
-                println!("  Interrupt Mode: {:?}", cfg.interrupt_mode());
+                println!("  Address Space:  {:?}", cfg.address_space_policy());
                 if let Some(dtb_addr) = cfg.image_config().dtb_load_gpa {
                     println!("  DTB Address:    {:#x}", dtb_addr.as_usize());
                 }
@@ -936,6 +957,7 @@ fn show_vm_full_details(vm_id: usize) {
                 VmVcpuState::Invalid => "Invalid",
                 VmVcpuState::Created => "Created",
                 VmVcpuState::Ready => "Ready",
+                VmVcpuState::Starting => "Starting",
             };
             *state_counts.entry(state).or_insert(0) += 1;
         }
@@ -956,6 +978,7 @@ fn show_vm_full_details(vm_id: usize) {
                 VmVcpuState::Invalid => "Invalid",
                 VmVcpuState::Created => "Created",
                 VmVcpuState::Ready => "Ready",
+                VmVcpuState::Starting => "Starting",
             };
 
             if let Some(phys_cpu_set) = vcpu.phys_cpu_set {
@@ -1011,7 +1034,7 @@ fn show_vm_full_details(vm_id: usize) {
         vm.with_config(|cfg| {
             println!("  BSP Entry:      {:#x}", cfg.bsp_entry().as_usize());
             println!("  AP Entry:       {:#x}", cfg.ap_entry().as_usize());
-            println!("  Interrupt Mode: {:?}", cfg.interrupt_mode());
+            println!("  Address Space:  {:?}", cfg.address_space_policy());
 
             if let Some(dtb_addr) = cfg.image_config().dtb_load_gpa {
                 println!("  DTB Address:    {:#x}", dtb_addr.as_usize());
@@ -1060,25 +1083,13 @@ fn show_vm_full_details(vm_id: usize) {
                 }
             }
 
-            // Show passthrough SPIs (ARM specific)
+            // Show physical IRQs routed through the virtual GIC.
             #[cfg(target_arch = "aarch64")]
             {
-                let spis = cfg.pass_through_spis();
-                if !spis.is_empty() {
+                let irqs = cfg.pass_through_irqs();
+                if !irqs.is_empty() {
                     println!();
-                    println!("  Passthrough SPIs: {:?}", spis);
-                }
-            }
-
-            // Show emulated devices
-            if !cfg.emu_devices().is_empty() {
-                println!();
-                println!(
-                    "  Emulated Devices: ({} device(s))",
-                    cfg.emu_devices().len()
-                );
-                for (idx, device) in cfg.emu_devices().iter().enumerate() {
-                    println!("    {}. {:?}", idx + 1, device);
+                    println!("  Physical IRQ Routes: {:?}", irqs);
                 }
             }
         });
@@ -1174,18 +1185,13 @@ pub fn build_vm_cmd(tree: &mut BTreeMap<String, CommandNode>) {
                 .with_long("graceful"),
         );
 
+    let console_cmd = CommandNode::new("Attach a running virtual machine console")
+        .with_handler(vm_console)
+        .with_usage("vm console <VM_ID>");
+
     let reset_cmd = CommandNode::new("Reset and restart a virtual machine")
         .with_handler(vm_reset)
         .with_usage("vm reset <VM_ID>...");
-
-    let restart_cmd = CommandNode::new("Restart a virtual machine (alias of reset)")
-        .with_handler(vm_restart)
-        .with_usage("vm restart [OPTIONS] <VM_ID>...")
-        .with_flag(
-            FlagDef::new("force", "Force restart")
-                .with_short('f')
-                .with_long("force"),
-        );
 
     let suspend_cmd = CommandNode::new("Suspend (pause) a running virtual machine")
         .with_handler(vm_suspend)
@@ -1251,11 +1257,11 @@ pub fn build_vm_cmd(tree: &mut BTreeMap<String, CommandNode>) {
     }
 
     vm_node = vm_node
+        .add_subcommand("console", console_cmd)
         .add_subcommand("stop", stop_cmd)
         .add_subcommand("suspend", suspend_cmd)
         .add_subcommand("resume", resume_cmd)
         .add_subcommand("reset", reset_cmd)
-        .add_subcommand("restart", restart_cmd)
         .add_subcommand("delete", delete_cmd)
         .add_subcommand("list", list_cmd)
         .add_subcommand("show", show_cmd);

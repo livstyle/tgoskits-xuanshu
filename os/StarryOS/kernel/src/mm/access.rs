@@ -12,7 +12,10 @@ use ax_errno::{AxError, AxResult};
 use ax_io::prelude::*;
 use ax_memory_addr::{MemoryAddr, VirtAddr};
 use ax_runtime::hal::{
-    cpu::{asm::user_copy, trap::page_fault_handler},
+    cpu::{
+        asm::user_copy,
+        trap::{PageFaultFlags, page_fault_handler},
+    },
     paging::MappingFlags,
 };
 use ax_task::{current, might_sleep};
@@ -21,6 +24,7 @@ use starry_vm::{VmError, VmIo, VmResult, vm_load_until_nul, vm_read_slice, vm_wr
 
 use crate::{
     config::{USER_SPACE_BASE, USER_SPACE_SIZE},
+    mm::paging_error_to_ax_error,
     task::AsThread,
 };
 
@@ -245,7 +249,7 @@ pub(crate) use nullable;
 pub static PAGE_FAULT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[page_fault_handler]
-fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
+fn handle_page_fault(vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
     debug!("Page fault at {vaddr:#x}, access_flags: {access_flags:#x?}");
 
     #[cfg(feature = "stack-guard-page")]
@@ -506,7 +510,10 @@ where
         move || -> AxResult<()> {
             let mut guard = ax_mm::kernel_aspace().lock();
             if guard.contains_range(aligned_addr, aligned_length) {
-                let (_, original_flags, _) = guard.page_table().query(aligned_addr)?;
+                let (_, original_flags, _) = guard
+                    .page_table()
+                    .query(aligned_addr)
+                    .map_err(paging_error_to_ax_error)?;
 
                 guard.protect(
                     aligned_addr,
@@ -554,10 +561,58 @@ pub fn flush_tlb_range(start: VirtAddr, size: usize) {
     ax_runtime::hal::cache::flush_tlb_range(start, size);
 }
 
-pub fn flush_tlb_range_sync(start: VirtAddr, size: usize) {
-    ax_runtime::hal::cache::flush_tlb_range_all_cpus(start, size);
+pub fn flush_tlb_range_sync(start: VirtAddr, size: usize) -> AxResult {
+    ax_runtime::hal::cache::flush_tlb_range_all_cpus(start, size).map_err(|err| match err {
+        ax_runtime::hal::cache::TlbShootdownError::CpuOffline
+        | ax_runtime::hal::cache::TlbShootdownError::Unsupported => AxError::Unsupported,
+        ax_runtime::hal::cache::TlbShootdownError::Timeout => AxError::TimedOut,
+        ax_runtime::hal::cache::TlbShootdownError::Platform => AxError::Io,
+    })
 }
 
 fn sync_modified_kernel_text(start: VirtAddr, size: usize) {
     ax_runtime::hal::cache::sync_kernel_text(start, size);
+}
+
+#[cfg(axtest)]
+pub(crate) fn user_pointer_metadata_rules_hold_for_test() -> bool {
+    let user_base = USER_SPACE_BASE;
+    let user_end = USER_SPACE_BASE + USER_SPACE_SIZE;
+    let ptr = UserPtr::<u32>::from(user_base);
+    let const_ptr = UserConstPtr::<u64>::from(user_base + 8);
+    let default_ptr = UserPtr::<u8>::default();
+    let default_const_ptr = UserConstPtr::<u8>::default();
+    let cast_ptr = ptr.cast::<u8>();
+    let cast_const_ptr = const_ptr.cast::<u8>();
+
+    default_ptr.is_null()
+        && !ptr.is_null()
+        && ptr.address().as_usize() == user_base
+        && ptr.as_ptr() as usize == user_base
+        && cast_ptr.address().as_usize() == user_base
+        && const_ptr.address().as_usize() == user_base + 8
+        && cast_const_ptr.address().as_usize() == user_base + 8
+        // Default const pointer is also null.
+        && default_const_ptr.is_null()
+        && !const_ptr.is_null()
+        // UserPtr/UserConstPtr From<usize> round-trips through address().
+        && UserPtr::<u64>::from(user_end - 8).address().as_usize() == user_end - 8
+        && UserConstPtr::<u64>::from(user_end - 8).address().as_usize() == user_end - 8
+        // check_access accepts zero-length access anywhere in user space,
+        // including exactly at USER_SPACE_BASE and one byte before USER_SPACE_END.
+        && check_access(user_base, 0).is_ok()
+        && check_access(user_end - 1, 0).is_ok()
+        && check_access(user_end, 0).is_err()
+        // check_access rejects start below USER_SPACE_BASE even for zero length.
+        && check_access(user_base - 1, 0).is_err()
+        && check_access(0, 0).is_err()
+        && check_access(user_base, 4096).is_ok()
+        && check_access(user_end - 1, 1).is_ok()
+        && check_access(user_base - 1, 1).is_err()
+        && check_access(user_end, 0).is_err()
+        && check_access(user_end - 1, 2).is_err()
+        // Lengths that would wrap the end pointer are rejected.
+        && check_access(user_base, USER_SPACE_SIZE).is_ok()
+        && check_access(user_base, USER_SPACE_SIZE + 1).is_err()
+        && check_access(user_end - 1, usize::MAX).is_err()
 }

@@ -19,6 +19,7 @@ use super::{
     discovery::{
         discover_test_group_names, qemu_list_error_is_ignorable, test_suite_dir, test_suite_root,
     },
+    initramfs::prepare_configured_busybox_initramfs,
     parse_target,
     types::PreparedAxvisorQemuCase,
 };
@@ -27,6 +28,8 @@ use crate::{
     context::{AxvisorCliArgs, ResolvedAxvisorRequest, SnapshotPersistence},
     test::{case as test_case, qemu as test_qemu},
 };
+
+const VCPU_RUNTIME_ERROR: &str = r"VM\[\d+\] run VCpu\[\d+\] get error";
 
 impl Axvisor {
     pub(super) async fn test_qemu(&mut self, args: ArgsTestQemu) -> anyhow::Result<()> {
@@ -127,14 +130,14 @@ impl Axvisor {
         for build_group in &mut build_groups {
             rootfs::ensure_qemu_rootfs_ready(&build_group.request, self.app.workspace_root(), None)
                 .await?;
-            rootfs::prepare_loongarch_linux_vmconfigs(
-                &mut build_group.request,
-                self.app.workspace_root(),
-                None,
-            )?;
             build_group.cargo = build::load_cargo_config(&build_group.request)?;
-            let group_vmconfigs = qemu_group_vmconfigs(&build_group.request, &build_group.cargo)?;
-            if vmconfigs_need_arceos_aarch64_smoke_guest(&build_group.request, &group_vmconfigs) {
+            prepare_configured_busybox_initramfs(
+                &build_group.request,
+                &build_group.cargo,
+                self.app.workspace_root(),
+            )
+            .await?;
+            if vmconfigs_need_arceos_aarch64_smoke_guest(&build_group.request) {
                 ensure_arceos_aarch64_smoke_guest_image(self.app.workspace_root())?;
             }
             if build_group_needs_arceos_x86_64_guest(&build_group.request) {
@@ -211,7 +214,7 @@ impl Axvisor {
                 &case.build_config_path,
                 &mut cargo_by_build_config,
             )?;
-            let mut qemu = self
+            let qemu = self
                 .app
                 .read_qemu_config_from_path_for_cargo(&cargo, &case.case.qemu_config_path)
                 .await
@@ -221,7 +224,6 @@ impl Axvisor {
                         case.case.display_name
                     )
                 })?;
-            test_qemu::apply_dynamic_platform_qemu_boot(&mut qemu, &cargo);
             test_qemu::validate_grouped_qemu_commands(&qemu, &case.case, "Axvisor")?;
             prepared.push(PreparedAxvisorQemuCase { case, qemu });
         }
@@ -252,7 +254,7 @@ impl Axvisor {
         let mut request = request.clone();
         request.build_info_path = build_config_path.to_path_buf();
         let cargo = build::load_cargo_config(&request)?;
-        request.vmconfigs = qemu_group_vmconfigs(&request, &cargo)?;
+        request.vmconfigs = build::vmconfigs_from_cargo(&cargo);
 
         Ok((request, cargo))
     }
@@ -276,6 +278,13 @@ impl Axvisor {
             &asset_config.grouped_runner,
         );
         test_qemu::apply_timeout_scale(&mut qemu);
+        if !qemu
+            .fail_regex
+            .iter()
+            .any(|pattern| pattern == VCPU_RUNTIME_ERROR)
+        {
+            qemu.fail_regex.push(VCPU_RUNTIME_ERROR.to_string());
+        }
 
         let rootfs_path = rootfs::qemu_rootfs_path(request, self.app.workspace_root(), None)?;
         let mut prepared_assets = test_case::prepare_case_assets(
@@ -303,8 +312,12 @@ impl Axvisor {
         }
         rootfs::patch_qemu_rootfs_path(&mut qemu, &prepared_assets.rootfs_path);
         qemu.args.extend(prepared_assets.extra_qemu_args.clone());
-        let cargo = build::load_cargo_config(request)?;
-        test_qemu::apply_dynamic_platform_qemu_boot(&mut qemu, &cargo);
+        // UEFI needs a writable ESP for firmware variables. Keep the explicit
+        // snapshot isolation, but apply it per drive so QEMU does not make the
+        // `fat:rw` ESP read-only through the global `-snapshot` flag.
+        if qemu.uefi {
+            test_qemu::apply_drive_snapshot_without_global_snapshot(&mut qemu);
+        }
         Ok((qemu, prepared_assets))
     }
 
@@ -348,29 +361,6 @@ impl Axvisor {
 
         Ok(elf_path.with_extension("bin"))
     }
-}
-
-fn qemu_group_vmconfigs(
-    request: &ResolvedAxvisorRequest,
-    cargo: &Cargo,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let Some(value) = cargo.env.get("AXVISOR_VM_CONFIGS") else {
-        return Ok(Vec::new());
-    };
-    std::env::split_paths(value)
-        .map(|path| {
-            if path.is_absolute() {
-                Ok(path)
-            } else {
-                Ok(request
-                    .axvisor_dir
-                    .parent()
-                    .and_then(Path::parent)
-                    .unwrap_or(&request.axvisor_dir)
-                    .join(path))
-            }
-        })
-        .collect()
 }
 
 fn axvisor_qemu_test_build_args(arch: &str, config: Option<PathBuf>) -> AxvisorCliArgs {

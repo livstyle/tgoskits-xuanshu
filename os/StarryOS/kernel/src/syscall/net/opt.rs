@@ -2,7 +2,7 @@ use alloc::vec;
 
 use ax_errno::{AxError, AxResult, LinuxError};
 use ax_net::{
-    InterfaceId,
+    InterfaceId, SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption, TcpInfo, TcpInfoOptions, TcpState},
 };
 use linux_raw_sys::net::{
@@ -262,6 +262,7 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as Duration,
             (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as Duration,
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool, // TODO: set accepted but no-op for non-unix
+            (SOL_SOCKET, SO_TIMESTAMP) => ReceiveTimestamp as IntBool,
             (SOL_SOCKET, SO_PEERCRED) => PeerCredentials as Ucred,
             (SOL_SOCKET, SO_TYPE) => SocketType as Int<i32>,       // read-only
             (SOL_SOCKET, SO_PROTOCOL) => SocketProtocol as Int<i32>,// read-only
@@ -276,8 +277,13 @@ macro_rules! call_dispatch {
             (PROTO_TCP, TCP_USER_TIMEOUT) => TcpUserTimeout as Int<u32>,
 
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
+            (PROTO_IP, IP_RECVTTL) => RecvTtl as IntBool,
             (PROTO_IP, linux_raw_sys::net::IP_RECVTOS) => RecvTos as IntBool,
             (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,  // TODO: hardcoded false, no errqueue support
+            // Path-MTU discovery mode is stored for ABI compatibility (dnsmasq TFTP sets
+            // IP_PMTUDISC_DONT on its transfer socket and aborts the transfer if the call fails);
+            // smoltcp does not model path-MTU discovery, so it has no wire effect.
+            (PROTO_IP, linux_raw_sys::net::IP_MTU_DISCOVER) => IpMtuDiscover as Int<u8>,
             // ---- Not yet implemented (add as needed) ----
             // (SOL_SOCKET, SO_LINGER) => ...,         // TODO: needs close() linger semantics
             // (SOL_SOCKET, SO_RCVLOWAT) => ...,       // TODO: needs kernel support
@@ -331,29 +337,46 @@ pub fn sys_getsockopt(
         val.cast().get_as_mut()
     }
 
+    if let Ok(socket) = NetlinkSocket::from_fd(fd) {
+        use linux_raw_sys::net::{SO_REUSEADDR, SOL_SOCKET};
+
+        if (level, optname) == (SOL_SOCKET, SO_REUSEADDR) {
+            *get::<i32>(optval, optlen)? = i32::from(socket.reuse_address());
+            return Ok(0);
+        }
+    }
+
     let socket = Socket::from_fd(fd)?;
 
-    // SO_TYPE is handled at the kernel level because the socket type is
-    // known from the Socket enum variant, not from a per-protocol option.
+    // SO_TYPE is normally implied by the kernel socket variant. Raw and Unix
+    // transports have multiple Linux-visible socket types, so query their
+    // per-socket options instead.
     {
         use ax_net::Socket as SocketInner;
         use linux_raw_sys::net::{
-            SO_BINDTODEVICE, SO_TYPE, SOCK_DGRAM, SOCK_RAW, SOCK_STREAM, SOL_SOCKET,
+            SO_ACCEPTCONN, SO_BINDTODEVICE, SO_TYPE, SOCK_DGRAM, SOCK_STREAM, SOL_SOCKET,
         };
 
+        if level == SOL_SOCKET && optname == SO_ACCEPTCONN {
+            *get::<i32>(optval, optlen)? = socket.is_listening() as i32;
+            return Ok(0);
+        }
         if level == SOL_SOCKET && optname == SO_TYPE {
             if *optlen == 0 {
                 return Ok(0);
             }
-            let so_type = match &**socket {
-                SocketInner::Tcp(_) => SOCK_STREAM,
-                SocketInner::Udp(_) => SOCK_DGRAM,
-                SocketInner::Raw(_) => SOCK_RAW,
-                SocketInner::Unix(_) => SOCK_STREAM,
+            let so_type: i32 = match &**socket {
+                SocketInner::Tcp(_) => SOCK_STREAM as i32,
+                SocketInner::Udp(_) => SOCK_DGRAM as i32,
+                SocketInner::Raw(_) | SocketInner::Unix(_) => {
+                    let mut t = 0i32;
+                    socket.get_option(GetSocketOption::SocketType(&mut t))?;
+                    t
+                }
                 #[cfg(feature = "vsock")]
-                SocketInner::Vsock(_) => SOCK_STREAM,
+                SocketInner::Vsock(_) => SOCK_STREAM as i32,
             };
-            *get(optval, optlen)? = so_type as i32;
+            *get(optval, optlen)? = so_type;
             return Ok(0);
         }
         if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
@@ -446,8 +469,8 @@ pub fn sys_setsockopt(
 
     if let Ok(socket) = NetlinkSocket::from_fd(fd) {
         use linux_raw_sys::net::{
-            SO_ATTACH_FILTER, SO_LOCK_FILTER, SO_PASSCRED, SO_RCVBUF, SO_RCVBUFFORCE, SO_SNDBUF,
-            SO_SNDBUFFORCE, SOL_SOCKET,
+            SO_ATTACH_FILTER, SO_LOCK_FILTER, SO_PASSCRED, SO_RCVBUF, SO_RCVBUFFORCE, SO_REUSEADDR,
+            SO_SNDBUF, SO_SNDBUFFORCE, SOL_SOCKET,
         };
 
         match (level, optname) {
@@ -470,6 +493,13 @@ pub fn sys_setsockopt(
             (SOL_SOCKET, SO_PASSCRED) => {
                 let value = read_int_sockopt(optval, optlen)?;
                 socket.set_passcred(value != 0);
+                return Ok(0);
+            }
+            (SOL_SOCKET, SO_REUSEADDR) => {
+                // Linux accepts this generic socket option before netlink
+                // bind. Netlink port and multicast-group binding in Starry
+                // does not use local-address reuse to resolve conflicts.
+                socket.set_reuse_address(read_int_sockopt(optval, optlen)? != 0);
                 return Ok(0);
             }
             _ => return Err(AxError::from(LinuxError::ENOPROTOOPT)),
@@ -559,4 +589,35 @@ pub fn sys_setsockopt(
     call_dispatch!(dispatch, (level, optname));
 
     Ok(0)
+}
+
+#[cfg(axtest)]
+pub(crate) fn net_opt_normalization_rules_hold_for_test() -> bool {
+    // normalize_ip_tos: strips ECN bits (lower 2 bits masked)
+    assert!(normalize_ip_tos(0x00) == 0x00); // No TOS, no ECN
+    assert!(normalize_ip_tos(0xFF) == 0xFC); // Full TOS, ECN stripped
+    assert!(normalize_ip_tos(0x03) == 0x00); // Only ECN bits
+    assert!(normalize_ip_tos(0xA4) == 0xA4); // High bits unchanged
+
+    // normalize_ipv6_tclass: -1 maps to 0
+    assert!(normalize_ipv6_tclass(-1).unwrap() == 0);
+
+    // normalize_ipv6_tclass: valid range 0-255, then normalize_ip_tos applied
+    assert!(normalize_ipv6_tclass(0).unwrap() == 0);
+    assert!(normalize_ipv6_tclass(252).unwrap() == 252); // No ECN bits
+    assert!(normalize_ipv6_tclass(128).unwrap() == 128); // High bits unchanged
+    assert!(normalize_ipv6_tclass(255).unwrap() == 252); // ECN bits stripped by normalize_ip_tos
+
+    // normalize_ipv6_tclass: out of range fails
+    assert!(normalize_ipv6_tclass(256).is_err());
+    assert!(normalize_ipv6_tclass(-2).is_err());
+
+    // IP_TOS_ECN_MASK constant check
+    assert!(IP_TOS_ECN_MASK == 0x03);
+
+    // Protocol constants
+    assert!(PROTO_TCP == 6);
+    assert!(PROTO_IP == 0);
+
+    true
 }

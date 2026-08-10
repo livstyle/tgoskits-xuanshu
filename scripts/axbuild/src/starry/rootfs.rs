@@ -105,7 +105,6 @@ pub(super) async fn load_patched_qemu_config(
     } else if apply_default_args {
         patch_qemu_rootfs(&mut qemu, request, starry.app.workspace_root(), None, mode)?;
     }
-    qemu_test::apply_dynamic_platform_qemu_boot(&mut qemu, cargo);
     qemu_test::apply_smp_qemu_arg(&mut qemu, request.smp);
 
     Ok(qemu)
@@ -344,7 +343,7 @@ mod tests {
             qemu.args,
             vec![
                 "-device".to_string(),
-                "virtio-blk-pci,drive=disk0".to_string(),
+                "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65".to_string(),
                 "-drive".to_string(),
                 format!("id=disk0,if=none,format=raw,file={}", rootfs.display()),
                 "-device".to_string(),
@@ -401,7 +400,7 @@ mod tests {
                 "-machine".to_string(),
                 "virt".to_string(),
                 "-device".to_string(),
-                "virtio-blk-pci,drive=disk0".to_string(),
+                "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65".to_string(),
                 "-drive".to_string(),
                 format!("id=disk0,if=none,format=raw,file={}", rootfs.display()),
                 "-device".to_string(),
@@ -434,7 +433,7 @@ mod tests {
                 "-machine".to_string(),
                 "virt".to_string(),
                 "-device".to_string(),
-                "virtio-blk-device,drive=disk0".to_string(),
+                "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65".to_string(),
                 "-drive".to_string(),
                 "id=disk0,if=none,format=raw,file=/old/rootfs.img".to_string(),
             ],
@@ -456,7 +455,7 @@ mod tests {
                 "-machine".to_string(),
                 "virt".to_string(),
                 "-device".to_string(),
-                "virtio-blk-device,drive=disk0".to_string(),
+                "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65".to_string(),
                 "-drive".to_string(),
                 format!("id=disk0,if=none,format=raw,file={}", rootfs.display()),
             ]

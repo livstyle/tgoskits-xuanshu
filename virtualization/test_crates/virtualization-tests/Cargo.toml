@@ -9,10 +9,12 @@ repository.workspace = true
 [dependencies]
 
 [dev-dependencies]
-ax-errno.workspace = true
 ax-plat.workspace = true
 axdevice.workspace = true
 axdevice_base.workspace = true
 axvm.workspace = true
 axvm-types.workspace = true
+axvmconfig.workspace = true
 irq-framework.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml.workspace = true

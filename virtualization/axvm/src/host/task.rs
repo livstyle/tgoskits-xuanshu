@@ -24,10 +24,6 @@ pub(crate) fn set_task_priority(task: &AxTaskRef, prio: isize) -> bool {
     modules::ax_task::set_task_priority(task, prio)
 }
 
-pub(crate) fn wake_task(task: &AxTaskRef) {
-    modules::ax_task::wake_task(task);
-}
-
 pub(crate) fn yield_now() {
     arceos::yield_now();
 }
@@ -42,6 +38,14 @@ pub(crate) fn wait_queue_wait_until(queue: &WaitQueueHandle, condition: impl Fn(
 
 pub(crate) fn wait_queue_wake(queue: &WaitQueueHandle, count: u32) {
     arceos::wait_queue_wake(queue, count);
+}
+
+pub(crate) fn run_on_cpu_sync(
+    cpu_id: usize,
+    f: unsafe fn(*mut ()),
+    arg: *mut (),
+) -> Result<(), arceos::ArceOsIrqError> {
+    arceos::run_on_cpu_sync(cpu_id, f, arg)
 }
 
 pub(crate) fn send_ipi(cpu_id: usize) {
