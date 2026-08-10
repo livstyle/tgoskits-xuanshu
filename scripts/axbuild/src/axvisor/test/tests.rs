@@ -956,6 +956,36 @@ fn asus_nuc15crh_linux_limits_legacy_serial_probe() {
 }
 
 #[test]
+fn aarch64_timer_stress_vm_configs_carry_guest_cmdline() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (path, timer_case) in [
+        (
+            "test-suit/axvisor/normal/qemu-timer-stress/aarch64-linux-timer-stress-v2.toml",
+            "axvisor.timer_case=gicv2",
+        ),
+        (
+            "test-suit/axvisor/normal/qemu-timer-stress/aarch64-linux-timer-stress.toml",
+            "axvisor.timer_case=gicv3-its",
+        ),
+    ] {
+        let content = fs::read_to_string(workspace_root.join(path)).unwrap();
+        let config: TestVmKernelConfig = toml::from_str(&content).unwrap();
+        let cmdline = config.kernel.cmdline;
+
+        assert!(
+            cmdline.contains("rdinit=/init"),
+            "{path} must set rdinit=/init in kernel.cmdline so the BusyBox initramfs test entry \
+             runs"
+        );
+        assert!(
+            cmdline.contains(timer_case),
+            "{path} must set {timer_case} in kernel.cmdline; outer QEMU -append does not reach \
+             the nested Linux guest"
+        );
+    }
+}
+
+#[test]
 fn nvme_smoke_keeps_storage_in_host_and_verifies_file_io() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 
