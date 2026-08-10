@@ -8,6 +8,17 @@ use tempfile::tempdir;
 use super::*;
 use crate::{axvisor::build, context::ResolvedAxvisorRequest};
 
+#[derive(serde::Deserialize)]
+struct TestVmKernelConfig {
+    kernel: TestVmKernel,
+}
+
+#[derive(serde::Deserialize)]
+struct TestVmKernel {
+    #[serde(default)]
+    cmdline: String,
+}
+
 fn write_qemu_config(root: &Path, case: &str, arch: &str, body: &str) -> PathBuf {
     write_qemu_config_in_group(root, "normal", "default", case, arch, body)
 }
@@ -573,6 +584,36 @@ fn discovers_uboot_test_group_from_board_cases() {
     assert_eq!(group.board_name, "rdk-s100-linux");
     assert_eq!(group.build_config, build_config);
     assert_eq!(group.board_test_config_path, board_test_config);
+}
+
+#[test]
+fn aarch64_timer_stress_vm_configs_carry_guest_cmdline() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (path, timer_case) in [
+        (
+            "test-suit/axvisor/normal/qemu-timer-stress/aarch64-linux-timer-stress-v2.toml",
+            "axvisor.timer_case=gicv2",
+        ),
+        (
+            "test-suit/axvisor/normal/qemu-timer-stress/aarch64-linux-timer-stress.toml",
+            "axvisor.timer_case=gicv3-its",
+        ),
+    ] {
+        let content = fs::read_to_string(workspace_root.join(path)).unwrap();
+        let config: TestVmKernelConfig = toml::from_str(&content).unwrap();
+        let cmdline = config.kernel.cmdline;
+
+        assert!(
+            cmdline.contains("rdinit=/init"),
+            "{path} must set rdinit=/init in kernel.cmdline so the BusyBox initramfs test entry \
+             runs"
+        );
+        assert!(
+            cmdline.contains(timer_case),
+            "{path} must set {timer_case} in kernel.cmdline; outer QEMU -append does not reach \
+             the nested Linux guest"
+        );
+    }
 }
 
 #[test]
