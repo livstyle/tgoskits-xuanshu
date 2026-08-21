@@ -112,29 +112,26 @@ pub fn find_all_passthrough_devices(vm_cfg: &AxVMConfig, fdt: &Fdt) -> Vec<Strin
 
     all_device_names.retain(|device_name| device_name != "/");
 
-    // Host QEMU attaches virtio-blk to a virtio-mmio slot. Initramfs guests
-    // (ramdisk configured) must not passthrough those host slots or Linux hangs
-    // waiting on the block device IRQ. Keep only emu-backed VirtioNet nodes.
-    // Guests that boot from the host disk keep all virtio-mmio nodes.
-    if vm_cfg.image_config().ramdisk.is_some() {
-        let emu_virtio_mmio: BTreeSet<String> = vm_cfg
-            .emu_devices()
+    /// Host QEMU attaches virtio-blk to virtio-mmio slots. Initramfs guests must
+    /// not passthrough those host slots or Linux hangs waiting on block IRQs.
+    /// Keep only the emulated virtio-net node installed for configured guests.
+    if vm_cfg.image_config().ramdisk.is_some()
+        && vm_cfg
+            .virtual_device_requests()
             .iter()
-            .filter(|dev| dev.emu_type == axvm_types::EmulatedDeviceType::VirtioNet)
-            .map(|dev| alloc::format!("/virtio_mmio@{:x}", dev.base_gpa))
-            .collect();
-        if !emu_virtio_mmio.is_empty() {
-            all_device_names.retain(|device_name| {
-                if !device_name.starts_with("/virtio_mmio@") {
-                    return true;
-                }
-                let keep = emu_virtio_mmio.contains(device_name);
-                if !keep {
-                    info!("Excluding host virtio-mmio (initramfs guest): {device_name}");
-                }
-                keep
-            });
-        }
+            .any(|device| device.model == "virtio-net")
+    {
+        const VIRTIO_NET_MMIO_PATH: &str = "/virtio_mmio@a000000";
+        all_device_names.retain(|device_name| {
+            if !device_name.starts_with("/virtio_mmio@") {
+                return true;
+            }
+            let keep = device_name == VIRTIO_NET_MMIO_PATH;
+            if !keep {
+                info!("Excluding host virtio-mmio (initramfs guest): {device_name}");
+            }
+            keep
+        });
     }
 
     debug!(

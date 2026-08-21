@@ -88,8 +88,8 @@ pub fn new_kernel_aspace() -> MmResult<AddrSpace> {
         let map_size = end - start;
         let vaddr = kernel_direct_map_virt(&aspace, base, start, map_size);
 
-        if aspace.contains_range(vaddr, size) {
-            aspace.map_boot_linear(vaddr, start, size, reg_flag_to_map_flag(r.flags))?;
+        if aspace.contains_range(vaddr, map_size) {
+            aspace.map_boot_linear(vaddr, start, map_size, reg_flag_to_map_flag(r.flags))?;
         }
     }
     aspace

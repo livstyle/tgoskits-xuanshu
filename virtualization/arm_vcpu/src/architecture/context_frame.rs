@@ -217,7 +217,7 @@ impl GuestSystemRegisters {
     ///
     /// When `save_timers` is `false`, generic timer registers are left untouched so a
     /// passthrough guest keeps direct CNTV/CNTP ownership across VM exits.
-    pub unsafe fn store(&mut self, save_timers: bool) {
+    pub unsafe fn store(&mut self, _save_timers: bool) {
         unsafe {
             // MRS!("self.vpidr_el2, VPIDR_EL2, "x");
             asm!("mrs {0}, VMPIDR_EL2", out(reg) self.vmpidr_el2);
@@ -254,7 +254,7 @@ impl GuestSystemRegisters {
     ///
     /// When `restore_timers` is `false`, generic timer registers are not touched so a
     /// passthrough guest keeps direct CNTV/CNTP ownership across VM exits.
-    pub unsafe fn restore(&self, restore_timers: bool) {
+    pub unsafe fn restore(&self, _restore_timers: bool) {
         unsafe {
             // Guest SP_EL0 is part of TrapFrame and is restored by `exception_return_el2`.
             asm!("msr SP_EL1, {0}", in(reg) self.sp_el1);

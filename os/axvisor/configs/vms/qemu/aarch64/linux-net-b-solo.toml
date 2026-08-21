@@ -4,7 +4,7 @@
 [base]
 id = 1
 name = "linux-qemu-net-b-solo"
-vm_type = 1
+guest_type = "passthrough"
 cpu_num = 1
 phys_cpu_ids = [1]
 vcpu_priorities = [10]
@@ -24,19 +24,11 @@ memory_regions = [
 ]
 
 [devices]
-interrupt_mode = "passthrough"
+passthrough = []
+disabled = [{ path = "/pcie@10000000" }]
 
-passthrough_devices = [
-    ["/"],
-]
+[[devices.virtual]]
+id = "virtnet0"
+model = "virtio-net"
+guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x03]
 
-passthrough_addresses = []
-
-# No disk needed; exclude PCIe virtio-blk.
-excluded_devices = [
-    ["/pcie@10000000"],
-]
-
-emu_devices = [
-  ["virtio-net0", 0xa000000, 0x1000, 48, 0xE2, [0x02, 0x00, 0x00, 0x00, 0x00, 0x03, 2]],
-]
