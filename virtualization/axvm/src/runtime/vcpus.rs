@@ -133,9 +133,6 @@ pub(crate) fn inject_pending_interrupts<A: Architecture>(
         warn!("VM[{vm_id}] not found, cannot drain VCpu[{vcpu_id}] interrupts");
         return;
     };
-    // Cross-VM VirtioNet RX must be completed on this VM's pCPU before the
-    // corresponding IRQ is injected into the guest.
-    vm.poll_virtio_net_rx();
     let Ok(interrupts) = vm.with_runtime(|runtime| Ok(runtime.drain_pending_interrupts(vcpu_id)))
     else {
         warn!("VM[{vm_id}] vCPU runtime not found, cannot drain VCpu[{vcpu_id}] interrupts");
@@ -362,13 +359,9 @@ pub(crate) fn spawn_registered_vcpu_task(
     });
     if let Some(priority) = host_sched_priority {
         if crate::host::task::set_task_priority(&task_ref, priority as isize) {
-            info!(
-                "VM[{vm_id}] VCpu[{vcpu_id}] host nice set to {priority}"
-            );
+            info!("VM[{vm_id}] VCpu[{vcpu_id}] host nice set to {priority}");
         } else {
-            warn!(
-                "VM[{vm_id}] VCpu[{vcpu_id}] failed to apply host nice {priority}"
-            );
+            warn!("VM[{vm_id}] VCpu[{vcpu_id}] failed to apply host nice {priority}");
         }
     }
     task_ref

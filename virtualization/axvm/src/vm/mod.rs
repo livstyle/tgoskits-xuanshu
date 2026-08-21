@@ -1322,6 +1322,7 @@ impl AxVM {
         let primary_vcpu = self
             .vcpu(0)
             .ok_or_else(|| ax_err_type!(BadState, "VM primary vCPU is not prepared"))?;
+        let primary_priority = primary_vcpu.host_sched_priority();
         let primary_task = crate::runtime::vcpus::build_vcpu_task(self, primary_vcpu);
         let runtime = Arc::new(VmRuntimeHandle::new());
 
@@ -1355,7 +1356,7 @@ impl AxVM {
             0,
             runtime.clone(),
             primary_task,
-            primary_vcpu.host_sched_priority(),
+            primary_priority,
         );
         Ok(())
     }

@@ -28,10 +28,6 @@ pub(crate) fn set_task_priority(task: &AxTaskRef, prio: isize) -> bool {
     modules::ax_task::set_task_priority(task, prio)
 }
 
-pub(crate) fn wake_task(task: &AxTaskRef) {
-    modules::ax_task::wake_task(task);
-}
-
 pub(crate) fn yield_now() {
     arceos::yield_now();
 }
