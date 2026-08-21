@@ -4145,7 +4145,7 @@ dependencies = [
 name = "icpc"
 version = "0.1.0"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

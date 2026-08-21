@@ -38,4 +38,3 @@ ax-sync = { path = "../../os/arceos/modules/axsync", features = ["host-test"] }
 divan = "0.1.21"
 paste = "1.0"
 rand = { version = "0.10", features = ["std_rng"] }
-ax-kspin = { workspace = true, features = ["host-test"] }

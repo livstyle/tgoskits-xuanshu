@@ -2,7 +2,7 @@
 
 use alloc::{collections::VecDeque, vec::Vec};
 
-use ax_kspin::SpinNoIrq as Mutex;
+use ax_sync::SpinLock as Mutex;
 
 /// Maximum Ethernet frame size accepted by the loopback path (incl. headers).
 pub const MAX_FRAME_LEN: usize = 1518;

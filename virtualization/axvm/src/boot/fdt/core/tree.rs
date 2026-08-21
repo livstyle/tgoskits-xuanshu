@@ -125,10 +125,7 @@ impl FdtTree {
         Ok(())
     }
 
-    pub(crate) fn patch_chosen(
-        &mut self,
-        explicit_cmdline: Option<&str>,
-    ) -> AxVmResult {
+    pub(crate) fn patch_chosen(&mut self, explicit_cmdline: Option<&str>) -> AxVmResult {
         let chosen_id = self.ensure_path("/chosen")?;
         let chosen = self
             .fdt

@@ -7,7 +7,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use ax_kspin::SpinNoIrq as Mutex;
+use ax_sync::SpinLock as Mutex;
 
 use super::backend::{MAX_FRAME_LEN, NetPortBackend};
 
@@ -59,7 +59,7 @@ fn should_drop_forwarded_frame(frame: &[u8]) -> bool {
     if !is_icpc {
         return false;
     }
-    icpc_frame_drop_hash(frame) % every == 0
+    icpc_frame_drop_hash(frame).is_multiple_of(every)
 }
 
 /// One switch port identifier (unique across the hypervisor).
@@ -262,7 +262,7 @@ impl NetPortBackend for SwitchPortBackend {
     fn try_receive(&self, out: &mut [u8]) -> Option<usize> {
         let frame = self.switch.try_receive(self.port)?;
         if out.len() < frame.len() {
-            // Drop oversized delivery rather than requeue under SpinNoIrq.
+            // Drop oversized delivery rather than requeue under the port lock.
             return None;
         }
         out[..frame.len()].copy_from_slice(&frame);

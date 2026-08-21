@@ -104,9 +104,7 @@ pub use serial::{
 pub use service::{DeviceServices, ServiceCardinality, ServiceKey};
 pub use virtio_net::{
     AclAction, FrameAcl, ICPC_UDP_PORT, IcpcPortAcl, LoopbackBackend, NetPortBackend, PortId,
-    SwitchPortBackend, VirtioNetDevice, VirtioNetFactory, VirtioNetPortEndpoint, VirtualSwitch,
-    configure_vsw_fault_inject, endpoints_for_vm, global_vsw, lookup_port, peer_endpoints,
-    register_port, unregister_port,
+    SwitchPortBackend, VirtualSwitch, configure_vsw_fault_inject, global_vsw,
 };
 #[cfg(target_arch = "x86_64")]
 // Reusable x86 device models and narrow typed services. These are target-gated
