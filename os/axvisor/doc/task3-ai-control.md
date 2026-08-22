@@ -1,7 +1,8 @@
 # Task 3：AI 模型与控制联动 — 实施指南
 
-> 对应赛题任务三（25 分）与 `plans/技术方案.md` §3.3。  
+> 对应赛题任务三（25 分）与 `plans/技术方案.md` §3.3。
 > 依赖 Task 2 icpc 双 Guest 拓扑。
+> 启动、QEMU 命令和 RK3588 实板步骤见 [`operations-guide.md`](operations-guide.md)。
 
 ---
 

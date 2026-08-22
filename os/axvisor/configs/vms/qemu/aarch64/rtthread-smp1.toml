@@ -23,4 +23,3 @@ memory_regions = [
 [devices]
 passthrough = []
 disabled = []
-

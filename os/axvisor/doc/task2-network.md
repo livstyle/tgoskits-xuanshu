@@ -1,6 +1,6 @@
 # Task 2：基于 IP 网络的客户机间通信 — 实施指南
 
-> 对应赛题任务二（25 分）与 `plans/技术方案.md` §3.2、阶段三。  
+> 对应赛题任务二（25 分）与 `plans/技术方案.md` §3.2、阶段三。
 > 进度跟踪见 [`plans/task2-实施记录.md`](../../plans/task2-实施记录.md)。
 
 ---
@@ -40,28 +40,28 @@ Guest B (RTOS)   10.0.9.3 / MAC 02:00:00:00:00:03
 
 | 交付物 | 路径 |
 |---|---|
-| VirtioNet 模拟 | `virtualization/axdevice/src/virtio_net/` |
-| 虚拟交换 vsw | `virtualization/axdevice/src/virtio_net/vsw.rs`（原规划 `os/axvisor/src/vsw/`） |
+| VirtioNet 模拟 | `os/axvisor/src/virtio_net.rs` + `virtualization/axvirtio-net/` |
+| 虚拟交换 | `virtualization/axvirtio-net/src/switch.rs` |
+| 故障注入 | `axvirtio_net::switch::configure_fault_inject`，由 `vsw-fault-inject` 在 `main()` 打开 |
 | icpc 协议库 | `components/icpc/` |
-| 压测 / CLI | `apps/icpc-bench/`、`apps/icpc-cli/`（后续） |
 | 测试用例 | `virtio-net-loopback/`、`vsw-dual-guest/`、`icpc-smoke/`、`icpc-bench/`、`icpc-acl-deny/`、`stress/icpc-fault-inject/` |
+
+启动、QEMU 命令和 RK3588 实板步骤见 [`operations-guide.md`](operations-guide.md)。
 
 ---
 
-## 4. VirtioNet `emu_devices` 约定
+## 4. VirtioNet 设备约定
+
+客户机网卡不再使用已删除的 `emu_devices` 表。当前 schema 在 `[devices]` 下声明虚拟设备，MAC 必须是非零单播地址；交换机端口号由运行时分配，不再写进 TOML。
 
 ```toml
-# ["name", base_gpa, length, irq_id, emu_type, cfg_list]
-# emu_type = 0xE2 (VirtioNet)
-# cfg_list:
-#   [mac0..mac5]           — loopback
-#   [mac0..mac5, port_id]  — attach to global L2 vsw
-emu_devices = [
-  ["virtio-net0", 0xa000000, 0x1000, 48, 0xE2, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02, 1]],
-]
+[[devices.virtual]]
+id = "virtnet0"
+model = "virtio-net"
+guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
 ```
 
-与 DTB `virtio_mmio@a000000` 重叠时，AxVM 跳过该区间直通，由模拟后端接管。
+`os/axvisor/src/virtio_net.rs` 把该设备接到全局 `VirtualSwitch`。MMIO 窗口固定在 `0x0a00_0000`、SPI 48；FDT 直通路径会排除与该 4K 页重叠的宿主 virtio-mmio 节点，避免虚拟网卡和宿主槽抢同一条 IRQ。
 
 ---
 

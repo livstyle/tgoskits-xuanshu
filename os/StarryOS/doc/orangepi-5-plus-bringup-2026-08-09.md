@@ -1,6 +1,6 @@
 # Orange Pi 5 Plus StarryOS 实板调试复盘（2026-08-09）
 
-> 环境：Orange Pi 5 Plus（RK3588、eMMC）、Ubuntu Focal rootfs、StarryOS、Orange Pi 原厂 U-Boot、1500000 波特率调试串口。  
+> 环境：Orange Pi 5 Plus（RK3588、eMMC）、Ubuntu Focal rootfs、StarryOS、Orange Pi 原厂 U-Boot、1500000 波特率调试串口。
 > 关联文档：[故障排查与恢复指南](board-orangepi-5-plus-troubleshooting.md)、
 > [实板刷写参考](board-flash-rk3588-visionfive2.md)。
 

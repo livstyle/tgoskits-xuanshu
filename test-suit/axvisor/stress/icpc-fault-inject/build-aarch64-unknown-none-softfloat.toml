@@ -1,7 +1,6 @@
 features = [
     "ax-driver/nvme",
     "fs",
-    "sched-cfs",
     "vsw-fault-inject",
 ]
 log = "Info"

@@ -31,4 +31,3 @@ disabled = []
 id = "virtnet0"
 model = "virtio-net"
 guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
-

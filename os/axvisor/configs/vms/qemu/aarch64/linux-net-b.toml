@@ -25,9 +25,18 @@ memory_regions = [
   [0x8000_0000, 0x1000_0000, 0x7, 0],
 ]
 
+# Guest A already owns the SPI-backed platform devices (pl061 GPIO INTID 39,
+# pl031 RTC INTID 34). Physical SPI routes are exclusive per VM, so Guest B
+# (initramfs-only, virtual virtio-net) must not claim them or VM creation fails
+# with "host INTID ... is already assigned to another VM".
 [devices]
 passthrough = []
-disabled = [{ path = "/pcie@10000000" }]
+disabled = [
+  { path = "/pcie@10000000" },
+  { path = "/pl061@9030000" },
+  { path = "/pl031@9010000" },
+  { path = "/gpio-keys" },
+]
 
 # mac 02:00:00:00:00:03
 [[devices.virtual]]
