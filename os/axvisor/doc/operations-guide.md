@@ -151,7 +151,13 @@ cargo xtask axvisor test board --board orangepi-5-plus-linux \
 
 也可以一条命令：`BOARD_IP=<board-ip> ./scripts/task1/run-board-rt-smoke.sh`。长采样 stress 是 `./scripts/task1/run-board-stress-baseline-vs-opt.sh`（18000 样本），适合在租约内的 self-hosted 板卡上跑。通过标准仍是串口 `RT_LATENCY_PASS` 且无 panic。
 
-CI 里还有 `orangepi-5-plus-linux` / `orangepi-5-plus-starry` 整板套件。本地只关心 RK3588 时，优先跑上面的 mixed-rt-smoke；完整套件耗时长，需要独占板卡租约。
+CI 里 `Board OrangePi 5 Plus · Linux guest` 只跑 `smoke`（验证板卡 SSH 与租约），不会自动执行 `board-orangepi-5-plus-mixed-rt-smoke`。Task1 混合分区冒烟需要先把 RT 客户机部署到板上，再显式指定用例：
+
+```bash
+BOARD_IP=<board-ip> ./scripts/task1/run-board-rt-smoke.sh
+```
+
+板上还需已有 Linux 客户机资产（`/guest/linux/orangepi-5-plus` 与 `/guest/linux/initramfs.cpio`），通常由板卡 golden rootfs 预装；缺 RT 镜像时 mixed-rt 会在串口等不到 `RT_LATENCY_PASS`。
 
 ### 4.3 StarryOS 部署
 

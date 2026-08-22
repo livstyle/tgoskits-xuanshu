@@ -3,13 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-echo "[task1-board] Building smoke RT guest (200 samples)..."
-RT_LATENCY_FEATURES="rt-latency,rt-latency-guest" \
-  "${ROOT}/os/axvisor/scripts/task1/build-arceos-rt-guest-board.sh"
-
-if [[ -n "${BOARD_IP:-}" ]]; then
-  "${ROOT}/scripts/task1/deploy-board-rt-guest.sh" "${BOARD_IP}"
-fi
+"${ROOT}/scripts/task1/prepare-board-mixed-rt-guests.sh"
 
 cd "${ROOT}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT}/target}" \
