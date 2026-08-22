@@ -1,7 +1,7 @@
 # StarryOS 实板刷写参考：RK3588 与 VisionFive 2
 
-> 适用仓库：`tgoskits` / StarryOS  
-> 最后更新：2026-08-04  
+> 适用仓库：`tgoskits` / StarryOS
+> 最后更新：2026-08-04
 > 相关文档：[StarryOS 快速上手](../../../docs/docs/quickstart/starryos.md)、[板卡管理](../../../docs/docs/build/board.md)、[StarryOS 测试套件 GUIDE](../../../test-suit/starryos/GUIDE.md)
 
 本文档说明如何将 **StarryOS 内核**部署到两块常见实板：
@@ -109,8 +109,8 @@ sudo apt install picocom
 picocom -b 1500000 --flow n /dev/ttyUSB0
 ```
 
-- `-b 1500000`：波特率  
-- `--flow n`：无流控（8N1）  
+- `-b 1500000`：波特率
+- `--flow n`：无流控（8N1）
 - 退出：`Ctrl+A`，再按 `Ctrl+X`
 
 也可用 minicom：
@@ -157,8 +157,8 @@ stty -F /dev/ttyUSB0 -a | grep -E 'speed|cs8|parenb|cstopb|crtscts'
 
 **4. 如何确认设置成功**
 
-1. 软件侧：`stty -F /dev/ttyUSB0 -a` 见上表三项均符合。  
-2. 硬件侧：串口终端已打开 → 给 Orange Pi **上电** → 应看到可读的 U-Boot / Linux 日志，例如 `U-Boot`、`Hit any key to stop autoboot`、`Starting kernel ...`。  
+1. 软件侧：`stty -F /dev/ttyUSB0 -a` 见上表三项均符合。
+2. 硬件侧：串口终端已打开 → 给 Orange Pi **上电** → 应看到可读的 U-Boot / Linux 日志，例如 `U-Boot`、`Hit any key to stop autoboot`、`Starting kernel ...`。
 3. 若全是乱码：检查是否误用 115200、TX/RX 是否接反、模块是否支持 1.5M。
 
 **5. 一键检查脚本（可选）**

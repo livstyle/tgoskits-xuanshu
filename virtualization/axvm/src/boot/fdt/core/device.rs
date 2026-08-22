@@ -123,21 +123,39 @@ pub fn find_all_passthrough_devices(vm_cfg: &AxVMConfig, fdt: &Fdt) -> Vec<Strin
 
     all_device_names.retain(|device_name| device_name != "/");
 
-    /// Host QEMU attaches virtio-blk to virtio-mmio slots. Initramfs guests must
-    /// not passthrough those host slots or Linux hangs waiting on block IRQs.
-    /// Keep only the emulated virtio-net node installed for configured guests.
-    if vm_cfg.image_config().ramdisk.is_some()
-        && vm_cfg
-            .virtual_device_requests()
-            .iter()
-            .any(|device| device.model == "virtio-net")
-    {
-        const VIRTIO_NET_MMIO_PATH: &str = "/virtio_mmio@a000000";
+    let has_virtual_virtio_net = vm_cfg
+        .virtual_device_requests()
+        .iter()
+        .any(|device| device.model == "virtio-net");
+
+    // The virtio-net device model claims the first QEMU virt virtio-mmio slot
+    // (0x0a00_0000 / SPI 48). Passing the host node through as well would
+    // register the physical SPI as an exclusive owner and make the virtual
+    // device's fixed IRQ request fail during VM creation. Stage-2 mappings are
+    // page-granular, so every host slot sharing the claimed 4 KiB page must
+    // also be excluded or the guest faults when probing those slots.
+    if has_virtual_virtio_net {
+        const VIRTIO_NET_MMIO_PAGE: u64 = 0x0a00_0000;
+        const PAGE_SIZE: u64 = 0x1000;
         all_device_names.retain(|device_name| {
-            if !device_name.starts_with("/virtio_mmio@") {
-                return true;
+            let claimed_page = device_name
+                .strip_prefix("/virtio_mmio@")
+                .and_then(|unit| u64::from_str_radix(unit, 16).ok())
+                .is_some_and(|addr| {
+                    (VIRTIO_NET_MMIO_PAGE..VIRTIO_NET_MMIO_PAGE + PAGE_SIZE).contains(&addr)
+                });
+            if claimed_page {
+                info!("Excluding host virtio-mmio slot claimed by virtio-net: {device_name}");
             }
-            let keep = device_name == VIRTIO_NET_MMIO_PATH;
+            !claimed_page
+        });
+    }
+
+    // Host QEMU attaches virtio-blk to virtio-mmio slots. Initramfs guests must
+    // not passthrough those host slots or Linux hangs waiting on block IRQs.
+    if vm_cfg.image_config().ramdisk.is_some() && has_virtual_virtio_net {
+        all_device_names.retain(|device_name| {
+            let keep = !device_name.starts_with("/virtio_mmio@");
             if !keep {
                 info!("Excluding host virtio-mmio (initramfs guest): {device_name}");
             }

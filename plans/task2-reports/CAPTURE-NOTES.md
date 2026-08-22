@@ -10,8 +10,7 @@ Task 2 数据面完全在 AxVisor 内 VirtioNet + vsw 完成，**不经过宿主
 
 启用 `Info`/`Debug` 时可看到：
 
-- `vsw forward UDP …`（`axdevice::virtio_net::vsw`）
-- `vsw fault inject: drop …`（`vsw-fault-inject` feature）
+- `vsw fault inject: drop icpc frame …`（`axvirtio_net::switch`，`vsw-fault-inject` feature）
 - cross-VM kick / SPI 路由相关日志（`axvm`）
 
 ### 2. Guest 串口输出（QEMU `-nographic`）

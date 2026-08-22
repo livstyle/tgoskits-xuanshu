@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMG="${ROOT}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img/rootfs-aarch64-alpine.img"
+IMG="${ROOT}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img"
 CPIO="${ROOT}/tmp/task2/peer-initramfs.cpio"
 GUEST_PATH="/guest/linux/peer-initramfs.cpio"
 

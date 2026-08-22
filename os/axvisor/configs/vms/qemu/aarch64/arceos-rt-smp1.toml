@@ -25,4 +25,3 @@ memory_regions = [
 [devices]
 passthrough = []
 disabled = [{ path = "/pcie@10000000" }]
-

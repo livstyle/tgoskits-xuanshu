@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMG="${ROOT}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img/rootfs-aarch64-alpine.img"
+IMG="${ROOT}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img"
 BIN="${ROOT}/tmp/task2/icpc-reliability-client"
 GUEST_PATH="/usr/local/bin/icpc-reliability"
 

@@ -139,6 +139,12 @@ pub struct DedupWindow {
     head: usize,
 }
 
+impl Default for DedupWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DedupWindow {
     pub const fn new() -> Self {
         Self {
@@ -149,7 +155,7 @@ impl DedupWindow {
 
     /// Returns `true` if `seq` was already seen.
     pub fn is_duplicate(&self, seq: u32) -> bool {
-        self.slots.iter().any(|&s| s == seq)
+        self.slots.contains(&seq)
     }
 
     pub fn remember(&mut self, seq: u32) {

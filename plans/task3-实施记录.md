@@ -1,7 +1,7 @@
 # Task 3 实施进度记录
 
-> 智能化工控虚拟化擂台赛 · 任务三：AI 模型与控制联动  
-> 主文档：[os/axvisor/doc/task3-ai-control.md](../os/axvisor/doc/task3-ai-control.md)  
+> 智能化工控虚拟化擂台赛 · 任务三：AI 模型与控制联动
+> 主文档：[os/axvisor/doc/task3-ai-control.md](../os/axvisor/doc/task3-ai-control.md)
 > 交卷状态：[plans/task3-reports/SUBMISSION-STATUS.md](task3-reports/SUBMISSION-STATUS.md)
 
 ---

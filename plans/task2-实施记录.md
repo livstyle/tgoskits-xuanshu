@@ -1,7 +1,7 @@
 # Task 2 实施进度记录
 
-> 智能化工控虚拟化擂台赛 · 任务二：基于 IP 网络的客户机间通信  
-> 主文档：[os/axvisor/doc/task2-network.md](../os/axvisor/doc/task2-network.md)  
+> 智能化工控虚拟化擂台赛 · 任务二：基于 IP 网络的客户机间通信
+> 主文档：[os/axvisor/doc/task2-network.md](../os/axvisor/doc/task2-network.md)
 > 交卷状态：[plans/task2-reports/SUBMISSION-STATUS.md](task2-reports/SUBMISSION-STATUS.md)
 
 ---
@@ -64,8 +64,8 @@ Passthrough 下 idle Guest 不 VM-exit → cross-VM kick 立即 peer RX DMA + `s
 |---|---|---|
 | Rust 可靠性 | `components/icpc/src/reliability.rs` | 停等 ACK、指数退避、心跳、dedup |
 | NEED_ACK 标志 | `components/icpc/src/flags.rs` | `ICPC_FLAG_NEED_ACK = 0x01` |
-| vsw 故障注入 | `virtualization/axdevice/src/virtio_net/vsw.rs` | 仅 icpc UDP 按 hash ~50% 丢包；ARP 放行 |
-| axvisor feature | `os/axvisor` `vsw-fault-inject` | 启动时 `configure_vsw_fault_inject(2)` |
+| vsw 故障注入 | `virtualization/axvirtio-net/src/switch.rs` | 仅 icpc UDP 按帧 hash ~50% 丢包；ARP/非 icpc 放行 |
+| axvisor feature | `os/axvisor` `vsw-fault-inject` | 启动时 `axvirtio_net::switch::configure_fault_inject(2)` |
 | Guest A 客户端 | `scripts/task2/icpc-reliability-client.c` | 停等 + 最多 20 次重试 |
 | Guest B dedup | `scripts/task2/icpc-peer-server.c` | 32 槽 seq 去重，重复仍回包 |
 | 测试 | `test-suit/axvisor/stress/icpc-fault-inject/` | 50% icpc 丢包下三类消息 PASS |

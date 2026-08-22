@@ -27,3 +27,8 @@ memory_regions = [
 passthrough = []
 disabled = [{ path = "/pcie@10000000" }]
 
+# mac 02:00:00:00:00:03
+[[devices.virtual]]
+id = "virtnet0"
+model = "virtio-net"
+guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x03]

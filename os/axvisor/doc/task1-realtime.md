@@ -1,7 +1,8 @@
 # Task 1：AxVisor 实时性改造与验证 — 实施指南
 
-> 对应赛题任务一（30 分）与 `plans/技术方案.md` 阶段一～二。  
+> 对应赛题任务一（30 分）与 `plans/技术方案.md` 阶段一～二。
 > 本文档描述**当前已落地**的配置、脚本、测试与后续改造路线。
+> 启动、QEMU 命令和 RK3588 实板步骤见 [`operations-guide.md`](operations-guide.md)。
 
 ---
 

@@ -106,7 +106,9 @@ fn main() {
     #[cfg(feature = "vsw-fault-inject")]
     {
         // Deterministic ~50% icpc UDP forward drop for icpc-fault-inject CI.
-        axdevice::configure_vsw_fault_inject(2);
+        // This must configure the axvirtio-net switch: it is the data plane
+        // the VirtioNet glue in `virtio_net.rs` actually forwards through.
+        axvirtio_net::switch::configure_fault_inject(2);
     }
 
     info!("Starting virtualization...");

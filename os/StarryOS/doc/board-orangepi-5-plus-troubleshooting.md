@@ -1,7 +1,7 @@
 # Orange Pi 5 Plus 实板故障排查与恢复指南
 
-> 适用：Orange Pi 5 Plus **eMMC 版**（RK3588）+ 本仓库 StarryOS 本地 U-Boot 部署  
-> 最后更新：2026-08-04  
+> 适用：Orange Pi 5 Plus **eMMC 版**（RK3588）+ 本仓库 StarryOS 本地 U-Boot 部署
+> 最后更新：2026-08-04
 > 相关文档：[实板刷写总览](board-flash-rk3588-visionfive2.md)、[board-linux-starry-debug](../../../.claude/skills/board-linux-starry-debug/SKILL.md)
 
 本文档整理手边单板调试中常见问题：**`starry uboot` 卡住**、**串口乱码/无设备**、**SPL 启动失败**、**eMMC 与 SPI 混淆**、**无读卡器/无 Windows 时的 Linux 恢复**，以及 **U-Boot 已出现后** 的 **TFTP/loady 兼容**、**旧版 U-Boot 环境变量缺失**、**1500000 串口双向不稳定**。
@@ -15,7 +15,7 @@
 | 把 **StarryOS 内核** 跑到板子上 | `target/.../starryos.bin` | U-Boot 串口加载（`starry uboot`） | `rkdeveloptool wl 0 starryos.bin` |
 | **恢复整盘 Linux 系统**（eMMC/SD） | 项目内 **没有** `orangepi.img` | 官方几 GB 镜像 + MaskROM 整盘写 | 把 14MB 的 `starryos.bin` 当整盘镜像 |
 
-StarryOS 设计是：**只替换内核到 RAM**，rootfs 继续用 eMMC 上已有的 Orange Pi Linux ext4（`mmcblk0p2`）。  
+StarryOS 设计是：**只替换内核到 RAM**，rootfs 继续用 eMMC 上已有的 Orange Pi Linux ext4（`mmcblk0p2`）。
 因此必须先让板子能进 **U-Boot 或 Linux**，再跑 `cargo xtask starry uboot`。
 
 ---
@@ -229,7 +229,7 @@ bootm 0x5480000
 | **SPI Flash** | 需 `cs 9` 切换后才操作 | SPL 从这里启动；损坏则全盘失败 |
 | **microSD** | 插板子 TF 槽 + `cs 2` 可写 | SPL 可 fallback 到 MMC1 |
 
-**关键区分**：MaskROM 能读写 eMMC **不等于** SPL 能从 eMMC 启动。  
+**关键区分**：MaskROM 能读写 eMMC **不等于** SPL 能从 eMMC 启动。
 eMMC 内容正确时，仍可能因 **SPI 里坏的 SPL/分区表** 导致 `mmc_init: -123` 与 `MTD2 Invalid GPT`。
 
 ---

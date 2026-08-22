@@ -1,6 +1,6 @@
 # Task 1 实施进度记录
 
-> 智能化工控虚拟化擂台赛 · 任务一：实时性改造与验证  
+> 智能化工控虚拟化擂台赛 · 任务一：实时性改造与验证
 > 主文档：[os/axvisor/doc/task1-realtime.md](../os/axvisor/doc/task1-realtime.md)
 
 ---
