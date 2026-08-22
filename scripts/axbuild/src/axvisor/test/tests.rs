@@ -198,8 +198,9 @@ fn orangepi_guest_board_cases_use_matching_vm_configs() {
         ),
     ] {
         let groups =
-            discover_board_test_groups(&workspace_root, "normal", None, Some(board_name)).unwrap();
-        assert_eq!(groups.len(), 1, "expected one case for {board_name}");
+            discover_board_test_groups(&workspace_root, "normal", Some("smoke"), Some(board_name))
+                .unwrap();
+        assert_eq!(groups.len(), 1, "expected smoke case for {board_name}");
 
         let build_config = fs::read_to_string(&groups[0].build_config).unwrap();
         let build_config: TestBuildConfigVmConfigs = toml::from_str(&build_config).unwrap();
