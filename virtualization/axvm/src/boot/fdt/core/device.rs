@@ -128,29 +128,12 @@ pub fn find_all_passthrough_devices(vm_cfg: &AxVMConfig, fdt: &Fdt) -> Vec<Strin
         .iter()
         .any(|device| device.model == "virtio-net");
 
-    // The virtio-net device model claims the first QEMU virt virtio-mmio slot
-    // (0x0a00_0000 / SPI 48). Passing the host node through as well would
-    // register the physical SPI as an exclusive owner and make the virtual
-    // device's fixed IRQ request fail during VM creation. Stage-2 mappings are
-    // page-granular, so every host slot sharing the claimed 4 KiB page must
-    // also be excluded or the guest faults when probing those slots.
-    if has_virtual_virtio_net {
-        const VIRTIO_NET_MMIO_PAGE: u64 = 0x0a00_0000;
-        const PAGE_SIZE: u64 = 0x1000;
-        all_device_names.retain(|device_name| {
-            let claimed_page = device_name
-                .strip_prefix("/virtio_mmio@")
-                .and_then(|unit| u64::from_str_radix(unit, 16).ok())
-                .is_some_and(|addr| {
-                    (VIRTIO_NET_MMIO_PAGE..VIRTIO_NET_MMIO_PAGE + PAGE_SIZE).contains(&addr)
-                });
-            if claimed_page {
-                info!("Excluding host virtio-mmio slot claimed by virtio-net: {device_name}");
-            }
-            !claimed_page
-        });
-    }
-
+    // Virtual virtio-net allocates from the architecture Auto MMIO pool
+    // (AArch64: 0x0b00_0000..0x1000_0000), so it no longer claims the first
+    // QEMU virtio-mmio page at 0x0a00_0000. That page still carries the host
+    // virtio-blk root disk for passthrough Linux guests; stripping it leaves
+    // Guest A without /dev/vda and fails icpc-smoke / task3-pid-loop.
+    //
     // Host QEMU attaches virtio-blk to virtio-mmio slots. Initramfs guests must
     // not passthrough those host slots or Linux hangs waiting on block IRQs.
     if vm_cfg.image_config().ramdisk.is_some() && has_virtual_virtio_net {
@@ -383,4 +366,88 @@ fn get_descendant_nodes_by_path(node_cache: &NodeCache, parent_path: &str) -> Ve
         .filter(|path| path.starts_with(&search_prefix) && path.len() > search_prefix.len())
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use axvmconfig::VirtualDeviceRequest;
+    use fdt_edit::{Fdt, Node};
+
+    use super::find_all_passthrough_devices;
+    use crate::{
+        GuestPhysAddr,
+        config::{
+            AxVMConfig, AxVMConfigParams, HostDeviceAssignment, PhysCpuList, RamdiskInfo,
+            VMImageConfig,
+        },
+    };
+
+    fn host_with_virtio_mmio_slots() -> Fdt {
+        let mut fdt = Fdt::new();
+        let root = fdt.root_id();
+        fdt.add_node(root, Node::new("virtio_mmio@a000000"));
+        fdt.add_node(root, Node::new("virtio_mmio@a000200"));
+        fdt.add_node(root, Node::new("pl011@9000000"));
+        fdt
+    }
+
+    fn virtio_net_passthrough_config(with_ramdisk: bool) -> AxVMConfig {
+        AxVMConfig::new(AxVMConfigParams {
+            phys_cpu_ls: PhysCpuList::new(1, Some(std::vec![0]), None, None),
+            pass_through_devices: std::vec![HostDeviceAssignment {
+                name: "/".into(),
+                ..Default::default()
+            }],
+            virtual_device_requests: std::vec![VirtualDeviceRequest {
+                id: "virtnet0".into(),
+                model: "virtio-net".into(),
+                options: toml::Table::new(),
+            }],
+            image_config: VMImageConfig {
+                ramdisk: with_ramdisk.then_some(RamdiskInfo {
+                    load_gpa: GuestPhysAddr::from(0x8400_0000),
+                    size: Some(4096),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn virtio_net_passthrough_keeps_host_virtio_blk_slot() {
+        // Virtual virtio-net now allocates from the AArch64 Auto MMIO pool at
+        // 0x0b00_0000. The host virtio-blk root disk still occupies the first
+        // QEMU virtio-mmio slot at 0x0a00_0000 and must remain visible.
+        let devices = find_all_passthrough_devices(
+            &virtio_net_passthrough_config(false),
+            &host_with_virtio_mmio_slots(),
+        );
+        assert!(
+            devices.iter().any(|path| path == "/virtio_mmio@a000000"),
+            "host virtio-blk slot 0xa000000 must stay for Guest A rootfs, got {devices:?}"
+        );
+        assert!(
+            devices.iter().any(|path| path == "/virtio_mmio@a000200"),
+            "later host virtio-mmio slots must stay, got {devices:?}"
+        );
+    }
+
+    #[test]
+    fn virtio_net_initramfs_guest_drops_host_virtio_mmio() {
+        let devices = find_all_passthrough_devices(
+            &virtio_net_passthrough_config(true),
+            &host_with_virtio_mmio_slots(),
+        );
+        assert!(
+            devices
+                .iter()
+                .all(|path| !path.starts_with("/virtio_mmio@")),
+            "initramfs peer must not passthrough host virtio-mmio slots, got {devices:?}"
+        );
+        assert!(
+            devices.iter().any(|path| path == "/pl011@9000000"),
+            "non-virtio host devices should remain, got {devices:?}"
+        );
+    }
 }

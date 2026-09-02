@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
@@ -192,6 +192,8 @@ impl Axvisor {
                 index,
             )?);
         }
+
+        prepare_linux_net_guest_assets(self.app.workspace_root(), &cases)?;
 
         // Phase 2: Run all QEMU tests now that every artifact is available.
         let case_groups = build_groups
@@ -629,9 +631,81 @@ pub(super) fn plan_qemu_case_artifacts<'case, 'artifact, T>(
         .collect())
 }
 
+fn linux_net_guest_setup_scripts(
+    case_names: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Vec<&'static str> {
+    let mut scripts = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut push = |script: &'static str| {
+        if seen.insert(script) {
+            scripts.push(script);
+        }
+    };
+    for case_name in case_names {
+        match case_name.as_ref() {
+            "icpc-smoke" => {
+                push("scripts/task2/setup-peer-initramfs.sh");
+                push("scripts/task2/setup-icpc-smoke.sh");
+            }
+            "icpc-bench" => {
+                push("scripts/task2/setup-peer-initramfs.sh");
+                push("scripts/task2/setup-icpc-bench.sh");
+            }
+            "icpc-acl-deny" => {
+                push("scripts/task2/setup-peer-initramfs.sh");
+                push("scripts/task2/setup-icpc-acl-deny.sh");
+            }
+            "icpc-fault-inject" => {
+                push("scripts/task2/setup-peer-initramfs.sh");
+                push("scripts/task2/setup-icpc-reliability.sh");
+            }
+            "vsw-dual-guest" => {
+                push("scripts/task2/setup-peer-initramfs.sh");
+                push("scripts/task2/setup-udp-probe.sh");
+                push("scripts/task2/setup-icpc-smoke.sh");
+            }
+            "vsw-peer-initramfs" => {
+                push("scripts/task2/setup-peer-initramfs.sh");
+            }
+            "task3-pid-loop" | "task3-pid-compare" => {
+                push("scripts/task2/setup-peer-initramfs.sh");
+                push("scripts/task3/setup-ai-loop.sh");
+            }
+            _ => {}
+        }
+    }
+    scripts
+}
+
+fn prepare_linux_net_guest_assets(
+    workspace_root: &Path,
+    cases: &[PreparedAxvisorQemuCase],
+) -> anyhow::Result<()> {
+    let scripts =
+        linux_net_guest_setup_scripts(cases.iter().map(|case| case.case.case.name.as_str()));
+    for script in scripts {
+        let path = workspace_root.join(script);
+        if !path.is_file() {
+            anyhow::bail!("missing Linux-net guest prep script `{}`", path.display());
+        }
+        let status = std::process::Command::new(&path)
+            .current_dir(workspace_root)
+            .status()
+            .with_context(|| format!("failed to spawn `{}`", path.display()))?;
+        if !status.success() {
+            anyhow::bail!(
+                "Linux-net guest preparation `{}` failed (exit={})",
+                script,
+                status.code().unwrap_or(-1)
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{combine_results, load_axvisor_http_probe_config};
+    use super::{combine_results, linux_net_guest_setup_scripts, load_axvisor_http_probe_config};
 
     fn ok() -> anyhow::Result<()> {
         Ok(())
@@ -710,5 +784,33 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn icpc_smoke_prepares_peer_initramfs_and_client() {
+        assert_eq!(
+            linux_net_guest_setup_scripts(["icpc-smoke"]),
+            [
+                "scripts/task2/setup-peer-initramfs.sh",
+                "scripts/task2/setup-icpc-smoke.sh",
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_linux_net_cases_dedup_peer_initramfs_setup() {
+        assert_eq!(
+            linux_net_guest_setup_scripts(["icpc-smoke", "task3-pid-loop", "smoke"]),
+            [
+                "scripts/task2/setup-peer-initramfs.sh",
+                "scripts/task2/setup-icpc-smoke.sh",
+                "scripts/task3/setup-ai-loop.sh",
+            ]
+        );
+    }
+
+    #[test]
+    fn unrelated_axvisor_cases_do_not_prepare_linux_net_assets() {
+        assert!(linux_net_guest_setup_scripts(["smoke", "linux-smp2"]).is_empty());
     }
 }
