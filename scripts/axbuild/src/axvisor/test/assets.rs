@@ -48,6 +48,9 @@ pub(super) fn arceos_x86_64_guest_bin_path(workspace_root: &Path) -> PathBuf {
 
 const ARCEOS_AARCH64_SMOKE_IMAGE_BUNDLE: &str = "qemu-aarch64";
 const ARCEOS_AARCH64_SMOKE_GUEST_KERNEL: &str = "arceos/arceos-qemu";
+const ARCEOS_RT_LATENCY_GUEST_IMAGE: &str = "qemu-aarch64-rt-latency-bench";
+const ARCEOS_RT_LATENCY_GUEST_BUILD_SCRIPT: &str =
+    "os/axvisor/scripts/task1/build-arceos-rt-guest.sh";
 
 pub(super) fn arceos_aarch64_smoke_guest_image_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(format!(
@@ -102,6 +105,60 @@ pub(super) fn ensure_arceos_aarch64_smoke_guest_image(workspace_root: &Path) -> 
     }
 
     ensure_file_exists(&image_path, "ArceOS smoke guest image")?;
+    Ok(())
+}
+
+pub(super) fn arceos_rt_latency_guest_image_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(format!(
+        "os/axvisor/images/qemu_aarch64_arceos_rt/{ARCEOS_RT_LATENCY_GUEST_IMAGE}"
+    ))
+}
+
+pub(super) fn vmconfig_requests_rt_latency_guest_image(contents: &str) -> bool {
+    contents.contains(ARCEOS_RT_LATENCY_GUEST_IMAGE)
+}
+
+pub(super) fn vmconfigs_need_arceos_rt_latency_guest(
+    workspace_root: &Path,
+    vmconfigs: &[PathBuf],
+) -> bool {
+    vmconfigs.iter().any(|path| {
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            workspace_root.join(path)
+        };
+        fs::read_to_string(&path)
+            .is_ok_and(|contents| vmconfig_requests_rt_latency_guest_image(&contents))
+    })
+}
+
+pub(super) fn ensure_arceos_rt_latency_guest_image(workspace_root: &Path) -> anyhow::Result<()> {
+    let image_path = arceos_rt_latency_guest_image_path(workspace_root);
+    if image_path.is_file() {
+        return Ok(());
+    }
+
+    let script = workspace_root.join(ARCEOS_RT_LATENCY_GUEST_BUILD_SCRIPT);
+    if !script.is_file() {
+        anyhow::bail!(
+            "missing ArceOS rt-latency guest build script `{}`",
+            script.display()
+        );
+    }
+    let status = Command::new(&script)
+        .current_dir(workspace_root)
+        .status()
+        .context("failed to spawn ArceOS rt-latency guest build script")?;
+    if !status.success() {
+        anyhow::bail!(
+            "ArceOS rt-latency guest build `{}` failed (exit={})",
+            script.display(),
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    ensure_file_exists(&image_path, "ArceOS rt-latency guest image")?;
     Ok(())
 }
 
@@ -214,5 +271,48 @@ pub(super) fn axvisor_case_asset_config() -> test_case::CaseAssetConfig {
         cache_env_vars: Vec::new(),
         prepare_staging_root: |_| Ok(()),
         prepare_guest_package_env: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use super::{vmconfig_requests_rt_latency_guest_image, vmconfigs_need_arceos_rt_latency_guest};
+
+    #[test]
+    fn rt_smp1_memory_image_is_the_custom_latency_bench() {
+        assert!(vmconfig_requests_rt_latency_guest_image(
+            r#"kernel_path = "../../../../images/qemu_aarch64_arceos_rt/qemu-aarch64-rt-latency-bench""#
+        ));
+        assert!(!vmconfig_requests_rt_latency_guest_image(
+            r#"kernel_path = "../../../../images/qemu-aarch64/arceos/arceos-qemu""#
+        ));
+    }
+
+    #[test]
+    fn missing_rt_latency_bench_vmconfig_does_not_request_custom_guest() {
+        let dir = tempfile::tempdir().unwrap();
+        let smoke = dir.path().join("arceos-rt-smp1-smoke.toml");
+        let guest = dir.path().join("arceos-rt-smp1.toml");
+        fs::write(
+            &smoke,
+            r#"kernel_path = "../../../../images/qemu-aarch64/arceos/arceos-qemu""#,
+        )
+        .unwrap();
+        fs::write(
+            &guest,
+            r#"kernel_path = "../../../../images/qemu_aarch64_arceos_rt/qemu-aarch64-rt-latency-bench""#,
+        )
+        .unwrap();
+        assert!(!vmconfigs_need_arceos_rt_latency_guest(
+            dir.path(),
+            &[smoke]
+        ));
+        assert!(vmconfigs_need_arceos_rt_latency_guest(dir.path(), &[guest]));
+        assert!(!vmconfigs_need_arceos_rt_latency_guest(
+            dir.path(),
+            &[PathBuf::from("missing.toml")]
+        ));
     }
 }

@@ -6,11 +6,7 @@ BIN="${ROOT}/tmp/task2/icpc-reliability-client"
 GUEST_PATH="/usr/local/bin/icpc-reliability"
 
 "${ROOT}/scripts/task2/build-icpc-reliability.sh" "${BIN}"
-
-if [[ ! -f "${IMG}" ]]; then
-  echo "[task2] rootfs image missing: ${IMG}" >&2
-  exit 1
-fi
+"${ROOT}/scripts/task2/ensure-alpine-rootfs.sh"
 
 DEBUGFS="$(command -v debugfs || echo /usr/sbin/debugfs)"
 echo "[task2] Installing ${BIN} -> ${IMG}:${GUEST_PATH}"

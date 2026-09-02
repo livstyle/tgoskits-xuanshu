@@ -15,8 +15,9 @@ use super::{
     assets::{
         arceos_x86_64_guest_elf_path, arceos_x86_64_guest_request, axvisor_case_asset_config,
         build_group_needs_arceos_x86_64_guest, case_needs_arceos_x86_64_guest,
-        ensure_arceos_aarch64_smoke_guest_image, inject_arceos_x86_64_guest_image,
-        vmconfigs_need_arceos_aarch64_smoke_guest,
+        ensure_arceos_aarch64_smoke_guest_image, ensure_arceos_rt_latency_guest_image,
+        inject_arceos_x86_64_guest_image, vmconfigs_need_arceos_aarch64_smoke_guest,
+        vmconfigs_need_arceos_rt_latency_guest,
     },
     discover_qemu_cases,
     discovery::{
@@ -161,6 +162,12 @@ impl Axvisor {
                 &build_group.request.vmconfigs,
             ) {
                 ensure_arceos_aarch64_smoke_guest_image(self.app.workspace_root())?;
+            }
+            if vmconfigs_need_arceos_rt_latency_guest(
+                self.app.workspace_root(),
+                &build_group.request.vmconfigs,
+            ) {
+                ensure_arceos_rt_latency_guest_image(self.app.workspace_root())?;
             }
             if build_group_needs_arceos_x86_64_guest(&build_group.request) {
                 self.build_arceos_x86_64_guest_image()
@@ -812,5 +819,59 @@ mod tests {
     #[test]
     fn unrelated_axvisor_cases_do_not_prepare_linux_net_assets() {
         assert!(linux_net_guest_setup_scripts(["smoke", "linux-smp2"]).is_empty());
+    }
+
+    #[test]
+    fn rt_latency_guest_build_uses_xtask_std_path_not_arceos_make() {
+        // The contest guest baseline compiled arceos-test-suit with the ArceOS
+        // Makefile (`-Z build-std=core,alloc`). That crate enables
+        // `ax-std/arceos` → `std-compat`, which then fails with ax-std/libc
+        // type errors and a missing panic handler. The native baseline already
+        // passes through `cargo xtask arceos`.
+        const SCRIPT: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../os/axvisor/scripts/task1/build-arceos-rt-guest.sh"
+        ));
+        assert!(
+            SCRIPT.contains("cargo xtask arceos build"),
+            "rt-latency guest image must reuse the passing native xtask path"
+        );
+        assert!(
+            SCRIPT.contains("rust-objcopy"),
+            "AxVisor memory load needs a flat binary at 0x8020_0000"
+        );
+        assert!(
+            !SCRIPT.contains("make A="),
+            "ArceOS make + std-compat is the contest Task 1 guest compile failure"
+        );
+    }
+
+    #[test]
+    fn linux_net_setup_scripts_pull_alpine_rootfs_before_debugfs() {
+        // Contest Task 2 first failed because setup-icpc-guests.sh wrote into
+        // Alpine with debugfs before `cargo xtask image pull` had created the
+        // managed rootfs.
+        const PEER: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/task2/setup-peer-initramfs.sh"
+        ));
+        const SMOKE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/task2/setup-icpc-smoke.sh"
+        ));
+        const AI: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/task3/setup-ai-loop.sh"
+        ));
+        for source in [PEER, SMOKE, AI] {
+            assert!(
+                source.contains("ensure-alpine-rootfs.sh"),
+                "Linux-net setup must pull Alpine before debugfs injection"
+            );
+            assert!(
+                !source.contains("rootfs image missing"),
+                "setup scripts should pull a missing Alpine image instead of exiting"
+            );
+        }
     }
 }

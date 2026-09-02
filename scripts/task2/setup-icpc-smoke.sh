@@ -8,11 +8,7 @@ BIN="${ROOT}/tmp/task2/icpc-smoke-client"
 GUEST_PATH="/usr/local/bin/icpc-smoke"
 
 "${ROOT}/scripts/task2/build-icpc-smoke.sh" "${BIN}"
-
-if [[ ! -f "${IMG}" ]]; then
-  echo "[task2] rootfs image missing: ${IMG}" >&2
-  exit 1
-fi
+"${ROOT}/scripts/task2/ensure-alpine-rootfs.sh"
 
 DEBUGFS="$(command -v debugfs || echo /usr/sbin/debugfs)"
 echo "[task2] Installing ${BIN} -> ${IMG}:${GUEST_PATH}"

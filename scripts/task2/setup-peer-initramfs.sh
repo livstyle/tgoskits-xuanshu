@@ -9,11 +9,7 @@ CPIO="${ROOT}/tmp/task2/peer-initramfs.cpio"
 GUEST_PATH="/guest/linux/peer-initramfs.cpio"
 
 "${ROOT}/scripts/task2/build-peer-initramfs.sh" "${CPIO}"
-
-if [[ ! -f "${IMG}" ]]; then
-  echo "[task2] rootfs image missing: ${IMG}" >&2
-  exit 1
-fi
+"${ROOT}/scripts/task2/ensure-alpine-rootfs.sh"
 
 DEBUGFS="$(command -v debugfs || echo /usr/sbin/debugfs)"
 echo "[task2] Installing ${CPIO} -> ${IMG}:${GUEST_PATH}"
